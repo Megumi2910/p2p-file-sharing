@@ -9,7 +9,10 @@ import java.util.List;
 import java.util.Map;
 
 public final class TransferTableModel extends AbstractTableModel {
-    private final String[] columns = {"Direction", "File", "Peer", "Progress", "Speed", "Status"};
+    private static final String[] COLUMNS = {
+            "Direction", "File", "Peer / Sources", "Progress", "Speed", "ETA", "Status"
+    };
+
     private final Map<String, TransferUpdate> byId = new LinkedHashMap<>();
 
     public void update(TransferUpdate update) {
@@ -17,8 +20,16 @@ public final class TransferTableModel extends AbstractTableModel {
         fireTableDataChanged();
     }
 
-    private List<TransferUpdate> rows() {
+    public List<TransferUpdate> rows() {
         return new ArrayList<>(byId.values());
+    }
+
+    public TransferUpdate getUpdateAt(int rowIndex) {
+        List<TransferUpdate> list = rows();
+        if (rowIndex >= 0 && rowIndex < list.size()) {
+            return list.get(rowIndex);
+        }
+        return null;
     }
 
     @Override
@@ -28,31 +39,30 @@ public final class TransferTableModel extends AbstractTableModel {
 
     @Override
     public int getColumnCount() {
-        return columns.length;
+        return COLUMNS.length;
     }
 
     @Override
     public String getColumnName(int column) {
-        return columns[column];
+        return COLUMNS[column];
     }
 
     @Override
     public Object getValueAt(int rowIndex, int columnIndex) {
-        TransferUpdate row = rows().get(rowIndex);
+        List<TransferUpdate> list = rows();
+        if (rowIndex < 0 || rowIndex >= list.size()) {
+            return null;
+        }
+        TransferUpdate row = list.get(rowIndex);
         return switch (columnIndex) {
             case 0 -> row.direction();
             case 1 -> row.fileName();
-            case 2 -> row.peerName();
+            case 2 -> row.formatSources();
             case 3 -> row.progressPercent() + "%";
-            case 4 -> formatSpeed(row.bytesPerSecond());
-            case 5 -> row.status() + (row.message() == null ? "" : " - " + row.message());
+            case 4 -> row.formatSpeed();
+            case 5 -> row.formatEta();
+            case 6 -> row.status() + (row.message() == null || row.message().isBlank() ? "" : " - " + row.message());
             default -> "";
         };
-    }
-
-    private static String formatSpeed(double bytesPerSecond) {
-        if (bytesPerSecond <= 0) return "-";
-        double mib = bytesPerSecond / 1024.0 / 1024.0;
-        return "%.2f MiB/s".formatted(mib);
     }
 }

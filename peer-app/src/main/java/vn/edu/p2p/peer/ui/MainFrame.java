@@ -19,6 +19,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
+import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
@@ -26,16 +27,22 @@ import javax.swing.SwingWorker;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
+import java.awt.Font;
 import java.nio.file.Path;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
 
 public final class MainFrame extends JFrame implements TransferListener {
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+
     private final PeerRuntime runtime;
     private final DefaultListModel<PeerInfo> peerModel = new DefaultListModel<>();
     private final JList<PeerInfo> peerList = new JList<>(peerModel);
     private final TransferTableModel transferModel = new TransferTableModel();
     private final SearchResultTableModel searchModel = new SearchResultTableModel();
+    private final ChunkVisualizerPanel visualizer = new ChunkVisualizerPanel();
     private final JTable searchTable = new JTable(searchModel);
     private final JTextField searchField = new JTextField(20);
     private final JButton searchButton = new JButton("Search Catalogue");
@@ -43,6 +50,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final JButton refreshButton = new JButton("Refresh peers");
     private final JButton sendButton = new JButton("Send file...");
     private final JTabbedPane tabbedPane = new JTabbedPane();
+    private final JTextArea logArea = new JTextArea();
     private long searchSequence = 0;
 
     public MainFrame(PeerRuntime runtime) {
@@ -53,7 +61,7 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     private void buildUi() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setMinimumSize(new Dimension(950, 600));
+        setMinimumSize(new Dimension(980, 620));
         setLocationByPlatform(true);
 
         JLabel identity = new JLabel(
@@ -75,11 +83,21 @@ public final class MainFrame extends JFrame implements TransferListener {
         peerButtons.add(sendButton);
         peersPanel.add(peerButtons, BorderLayout.SOUTH);
 
-        // Tab 1: Transfers
+        // Tab 1: Transfers with Chunk Visualizer
         JTable transfers = new JTable(transferModel);
         transfers.setFillsViewportHeight(true);
-        JPanel transfersPanel = new JPanel(new BorderLayout());
+        transfers.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        transfers.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                int row = transfers.getSelectedRow();
+                TransferUpdate u = transferModel.getUpdateAt(row);
+                visualizer.updateFrom(u);
+            }
+        });
+
+        JPanel transfersPanel = new JPanel(new BorderLayout(6, 6));
         transfersPanel.add(new JScrollPane(transfers), BorderLayout.CENTER);
+        transfersPanel.add(visualizer, BorderLayout.SOUTH);
         tabbedPane.addTab("Transfers", transfersPanel);
 
         // Tab 2: Catalogue Search
@@ -96,8 +114,20 @@ public final class MainFrame extends JFrame implements TransferListener {
         searchPanel.add(new JScrollPane(searchTable), BorderLayout.CENTER);
         tabbedPane.addTab("Catalogue Search", searchPanel);
 
+        // Tab 3: Activity Log
+        logArea.setEditable(false);
+        logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        JPanel logPanel = new JPanel(new BorderLayout(4, 4));
+        logPanel.add(new JScrollPane(logArea), BorderLayout.CENTER);
+        JButton clearLogBtn = new JButton("Clear Log");
+        clearLogBtn.addActionListener(e -> logArea.setText(""));
+        JPanel logBottom = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        logBottom.add(clearLogBtn);
+        logPanel.add(logBottom, BorderLayout.SOUTH);
+        tabbedPane.addTab("Activity Log", logPanel);
+
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, peersPanel, tabbedPane);
-        split.setResizeWeight(0.3);
+        split.setResizeWeight(0.28);
         add(split, BorderLayout.CENTER);
 
         refreshButton.addActionListener(e -> refreshPeers());
@@ -187,7 +217,7 @@ public final class MainFrame extends JFrame implements TransferListener {
 
         try {
             runtime.downloadFile(result);
-            tabbedPane.setSelectedIndex(0); // Switch to Transfers tab to watch progress
+            tabbedPane.setSelectedIndex(0); // Switch to Transfers tab
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "Could not start download: " + ex.getMessage(), "Download error", JOptionPane.ERROR_MESSAGE);
         }
@@ -219,6 +249,15 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     @Override
     public void onUpdate(TransferUpdate update) {
-        SwingUtilities.invokeLater(() -> transferModel.update(update));
+        SwingUtilities.invokeLater(() -> {
+            transferModel.update(update);
+            visualizer.updateFrom(update);
+            String ts = LocalTime.now().format(TIME_FORMATTER);
+            logArea.append("[%s] [%s] %s (%s) %d%% %s%s\n".formatted(
+                    ts, update.direction(), update.fileName(), update.formatSources(),
+                    update.progressPercent(), update.status(),
+                    (update.message() != null && !update.message().isBlank() ? " - " + update.message() : "")
+            ));
+        });
     }
 }

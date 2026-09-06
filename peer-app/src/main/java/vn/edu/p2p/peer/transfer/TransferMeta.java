@@ -86,6 +86,9 @@ public final class TransferMeta {
         }
         return receivedChunks.get((int) chunkIndex);
     }
+    public synchronized long[] getBitmapMask() {
+        return receivedChunks.toLongArray();
+    }
 
     public synchronized long contiguousReceivedPrefix() {
         if (totalChunks == 0) {

@@ -40,10 +40,10 @@ java -jar peer-app.jar peer.properties
 
 Open [`docs/index.html`](docs/index.html) directly in a browser. The offline handbook explains the concepts, architecture, protocol, transfer lifecycle, configuration, demonstration flow, source structure, verification evidence, troubleshooting, limitations, roadmap, and documentation maintenance policy.
 
-- [Setup and configuration](docs/setup-and-configuration.html)
-- [Protocol reference](docs/protocol-reference.html)
+- [Setup and configuration](docs/guides/setup-and-configuration.html)
+- [Protocol reference](docs/reference/protocol-reference.html)
 - [Project foundation and execution plan](docs/plans/foundation-plan.html)
-- [Known limitations and roadmap](docs/limitations-and-roadmap.html)
-- [Documentation maintenance contract](docs/maintenance.html)
+- [Known limitations and roadmap](docs/plans/limitations-and-roadmap.html)
+- [Documentation maintenance contract](docs/development/maintenance.html)
 
 Documentation is part of every change: all affected pages and the handbook changelog must be updated in the same task.

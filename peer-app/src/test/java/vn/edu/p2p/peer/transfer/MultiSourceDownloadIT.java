@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -113,6 +114,20 @@ class MultiSourceDownloadIT {
                 new PeerInfo("bob", "Bob", "127.0.0.1", bobPort)
         );
 
+        AtomicInteger aliceChunksServed = new AtomicInteger(0);
+        AtomicInteger bobChunksServed = new AtomicInteger(0);
+
+        aliceManager.setListener(u -> {
+            if (u.direction() == TransferDirection.SEND && u.status() == TransferStatus.TRANSFERRING) {
+                aliceChunksServed.incrementAndGet();
+            }
+        });
+        bobManager.setListener(u -> {
+            if (u.direction() == TransferDirection.SEND && u.status() == TransferStatus.TRANSFERRING) {
+                bobChunksServed.incrementAndGet();
+            }
+        });
+
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<TransferStatus> finalStatus = new AtomicReference<>();
 
@@ -129,6 +144,11 @@ class MultiSourceDownloadIT {
         assertTrue(latch.await(10, TimeUnit.SECONDS), "Download timed out");
         assertEquals(TransferStatus.COMPLETED, finalStatus.get());
 
+        // Verify both providers contributed in parallel
+        assertTrue(aliceChunksServed.get() > 0, "Alice must serve at least 1 chunk (served: " + aliceChunksServed.get() + ")");
+        assertTrue(bobChunksServed.get() > 0, "Bob must serve at least 1 chunk (served: " + bobChunksServed.get() + ")");
+        assertEquals(8, aliceChunksServed.get() + bobChunksServed.get(), "Total chunks served must equal 8");
+
         Path downloaded = charlieDownloads.resolve("shared_book.bin");
         assertTrue(Files.exists(downloaded));
         assertEquals(size, Files.size(downloaded));
@@ -138,22 +158,37 @@ class MultiSourceDownloadIT {
 
     @Test
     @Timeout(value = 15, unit = TimeUnit.SECONDS)
-    void testFailoverWhenOnePeerFails() throws Exception {
-        // Create a 4-chunk file (4,096 bytes)
-        int size = 4 * C;
+    void testFailoverWhenOnePeerFailsMidTransfer() throws Exception {
+        // Create an 8-chunk file (8,192 bytes)
+        int size = 8 * C;
         byte[] data = new byte[size];
         new Random(99).nextBytes(data);
 
-        // Only Bob has the file; Alice doesn't have it (simulating unavailable file/peer failure on Alice)
+        // Both Alice and Bob have the file initially
+        Path aliceFile = aliceShared.resolve("failover_test.bin");
         Path bobFile = bobShared.resolve("failover_test.bin");
+        Files.write(aliceFile, data);
         Files.write(bobFile, data);
         String sha = HashUtil.sha256(bobFile);
 
-        FileRecord targetFile = new FileRecord(sha, "failover_test.bin", size, C, 4);
+        FileRecord targetFile = new FileRecord(sha, "failover_test.bin", size, C, 8);
         List<PeerInfo> providers = List.of(
                 new PeerInfo("alice", "Alice", "127.0.0.1", alicePort),
                 new PeerInfo("bob", "Bob", "127.0.0.1", bobPort)
         );
+
+        // Intercept Alice: after serving 1 chunk, abruptly shut down Alice's server
+        AtomicInteger aliceServed = new AtomicInteger(0);
+        aliceManager.setListener(u -> {
+            if (u.direction() == TransferDirection.SEND && u.status() == TransferStatus.TRANSFERRING) {
+                if (aliceServed.incrementAndGet() == 1) {
+                    try {
+                        aliceServer.close();
+                        aliceManager.close();
+                    } catch (Exception ignored) {}
+                }
+            }
+        });
 
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<TransferStatus> finalStatus = new AtomicReference<>();
@@ -166,7 +201,7 @@ class MultiSourceDownloadIT {
             }
         });
 
-        // Charlie requests from [Alice, Bob]. Alice rejects or fails; Bob fulfills all chunks!
+        // Charlie downloads from [Alice, Bob]. Alice drops mid-transfer, Bob recovers and serves the rest!
         charlieManager.downloadMultiSource(providers, targetFile);
 
         assertTrue(latch.await(10, TimeUnit.SECONDS), "Failover download timed out");

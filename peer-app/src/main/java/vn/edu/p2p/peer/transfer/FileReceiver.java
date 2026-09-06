@@ -402,9 +402,17 @@ public final class FileReceiver implements Runnable {
                 }
 
                 long fileSize = Files.size(source);
-                int chunkSize = config.chunkSizeBytes();
-                long offset = chunkIndex * (long) chunkSize;
-                if (offset < 0 || (fileSize > 0 && offset >= fileSize) || (fileSize == 0 && chunkIndex > 0)) {
+                int chunkSize = Integer.parseInt(request.headers().getOrDefault("chunkSize", Integer.toString(config.chunkSizeBytes())));
+                if (chunkSize < 1 || chunkSize > vn.edu.p2p.common.protocol.TransferProtocol.MAX_CHUNK_BYTES) {
+                    FrameIO.write(socket.getOutputStream(), new Frame(
+                            MessageType.FILE_REJECT,
+                            Map.of("reason", "Invalid chunkSize: " + chunkSize, "transferId", tid)
+                    ));
+                    return;
+                }
+
+                long totalChunks = fileSize == 0 ? 0 : (fileSize / chunkSize + (fileSize % chunkSize == 0 ? 0 : 1));
+                if (chunkIndex < 0 || (totalChunks > 0 && chunkIndex >= totalChunks) || (totalChunks == 0 && chunkIndex != 0)) {
                     FrameIO.write(socket.getOutputStream(), new Frame(
                             MessageType.FILE_REJECT,
                             Map.of("reason", "Chunk index out of bounds: " + chunkIndex, "transferId", tid)
@@ -412,7 +420,8 @@ public final class FileReceiver implements Runnable {
                     return;
                 }
 
-                int length = fileSize == 0 ? 0 : (int) Math.min(chunkSize, fileSize - offset);
+                long offset = chunkIndex * (long) chunkSize;
+                int length = fileSize == 0 ? 0 : (int) Math.min((long) chunkSize, fileSize - offset);
                 byte[] buffer = new byte[length];
                 if (length > 0) {
                     try (RandomAccessFile raf = new RandomAccessFile(source.toFile(), "r")) {
@@ -429,6 +438,11 @@ public final class FileReceiver implements Runnable {
                 headers.put("chunkSha256", chunkSha256);
 
                 FrameIO.write(socket.getOutputStream(), new Frame(MessageType.CHUNK_DATA, headers, buffer));
+                listener.onUpdate(new TransferUpdate(
+                        tid, source.getFileName().toString(), "Downloader", TransferDirection.SEND,
+                        TransferStatus.TRANSFERRING, offset + length, fileSize, 0,
+                        "Served chunk " + (chunkIndex + 1)
+                ));
 
                 socket.setSoTimeout(config.transferReadTimeoutMillis());
                 request = FrameIO.read(socket.getInputStream(), 0);

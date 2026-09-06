@@ -1,7 +1,9 @@
 package vn.edu.p2p.peer.transfer;
 
 import java.util.BitSet;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 public final class ChunkScheduler {
@@ -9,6 +11,7 @@ public final class ChunkScheduler {
     private final BitSet missingChunks;
     private final BitSet inFlightChunks;
     private final Set<String> failedPeers = new HashSet<>();
+    private final Map<String, Long> activeAssignments = new HashMap<>();
 
     public ChunkScheduler(long totalChunks, TransferMeta meta) {
         this.totalChunks = totalChunks;
@@ -35,6 +38,9 @@ public final class ChunkScheduler {
             }
             if (!inFlightChunks.get(candidate)) {
                 inFlightChunks.set(candidate);
+                if (peerId != null) {
+                    activeAssignments.put(peerId, (long) candidate);
+                }
                 return (long) candidate;
             }
             nextIndex = candidate + 1;
@@ -44,15 +50,24 @@ public final class ChunkScheduler {
 
     public synchronized void markSuccess(long chunkIndex) {
         int idx = (int) chunkIndex;
-        missingChunks.clear(idx);
-        inFlightChunks.clear(idx);
+        if (idx >= 0 && idx < totalChunks) {
+            missingChunks.clear(idx);
+            inFlightChunks.clear(idx);
+        }
+        activeAssignments.values().remove(chunkIndex);
     }
 
     public synchronized void markFailure(long chunkIndex, String peerId) {
-        int idx = (int) chunkIndex;
-        inFlightChunks.clear(idx);
+        long targetChunk = chunkIndex;
+        if (targetChunk < 0 && peerId != null && activeAssignments.containsKey(peerId)) {
+            targetChunk = activeAssignments.remove(peerId);
+        }
+        if (targetChunk >= 0 && targetChunk < totalChunks) {
+            inFlightChunks.clear((int) targetChunk);
+        }
         if (peerId != null) {
             failedPeers.add(peerId);
+            activeAssignments.remove(peerId);
         }
     }
 

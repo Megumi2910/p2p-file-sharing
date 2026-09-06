@@ -124,6 +124,7 @@ public final class MultiSourceDownloader implements Runnable {
                     final PeerInfo peer = providers.get(w % providers.size());
                     Thread worker = new Thread(() -> {
                         Socket socket = null;
+                        Long currentAssignedChunk = null;
                         try {
                             if (session.isCancelled()) {
                                 return;
@@ -139,10 +140,10 @@ public final class MultiSourceDownloader implements Runnable {
                                     if (scheduler.isDone()) {
                                         break;
                                     }
-                                    // Chunks might be in-flight on other peers; sleep briefly
                                     Thread.sleep(100);
                                     continue;
                                 }
+                                currentAssignedChunk = chunkIndex;
 
                                 socket.setSoTimeout(config.transferReadTimeoutMillis());
                                 FrameIO.write(socket.getOutputStream(), new Frame(
@@ -150,14 +151,27 @@ public final class MultiSourceDownloader implements Runnable {
                                         Map.of(
                                                 "transferId", transferId,
                                                 "fileId", targetFile.fileId(),
-                                                "chunkIndex", Long.toString(chunkIndex)
+                                                "chunkIndex", Long.toString(chunkIndex),
+                                                "chunkSize", Integer.toString(targetFile.chunkSizeBytes())
                                         )
                                 ));
 
                                 Frame reply = FrameIO.read(socket.getInputStream(), targetFile.chunkSizeBytes());
                                 if (reply.type() != MessageType.CHUNK_DATA) {
                                     scheduler.markFailure(chunkIndex, peer.peerId());
-                                    break; // Peer rejected or sent unexpected frame; failover
+                                    currentAssignedChunk = null;
+                                    break;
+                                }
+
+                                long replyIndex = Long.parseLong(reply.requireHeader("chunkIndex"));
+                                long replyOffset = Long.parseLong(reply.requireHeader("offset"));
+                                long expectedOffset = chunkIndex * (long) targetFile.chunkSizeBytes();
+                                int expectedLen = (int) Math.min(targetFile.chunkSizeBytes(), targetFile.fileSize() - expectedOffset);
+
+                                if (replyIndex != chunkIndex || replyOffset != expectedOffset || reply.payload().length != expectedLen) {
+                                    scheduler.markFailure(chunkIndex, peer.peerId());
+                                    currentAssignedChunk = null;
+                                    break;
                                 }
 
                                 String replySha = reply.requireHeader("chunkSha256").toLowerCase(Locale.ROOT);
@@ -166,19 +180,21 @@ public final class MultiSourceDownloader implements Runnable {
 
                                 if (!actualSha.equals(replySha)) {
                                     scheduler.markFailure(chunkIndex, peer.peerId());
-                                    break; // Chunk hash mismatch; failover
+                                    currentAssignedChunk = null;
+                                    break;
                                 }
 
                                 // Write verified chunk to shared file
                                 synchronized (fileWriteLock) {
-                                    long offset = chunkIndex * (long) targetFile.chunkSizeBytes();
-                                    out.seek(offset);
+                                    out.seek(expectedOffset);
                                     out.write(payload);
                                     activeTransferMeta.markChunkReceived(chunkIndex);
                                     activeTransferMeta.save(activeMetaPath);
                                 }
 
                                 scheduler.markSuccess(chunkIndex);
+                                currentAssignedChunk = null;
+
                                 long totalSoFar = confirmedBytes.addAndGet(payload.length);
                                 double seconds = Math.max(0.001, (System.nanoTime() - startedAt) / 1_000_000_000.0);
                                 update(transferId, fileName, providerNames, TransferStatus.TRANSFERRING, totalSoFar, fileSize,
@@ -186,12 +202,20 @@ public final class MultiSourceDownloader implements Runnable {
                                         "Downloaded " + scheduler.remainingCount() + " remaining chunks");
                             }
                         } catch (Exception ex) {
-                            scheduler.markFailure(-1, peer.peerId());
+                            if (currentAssignedChunk != null) {
+                                scheduler.markFailure(currentAssignedChunk, peer.peerId());
+                            } else {
+                                scheduler.markFailure(-1, peer.peerId());
+                            }
                         } finally {
-                            if (socket != null && !socket.isClosed()) {
-                                try {
-                                    socket.close();
-                                } catch (IOException ignored) {}
+                            if (socket != null) {
+                                session.detach(socket);
+                                if (!socket.isClosed()) {
+                                    try {
+                                        socket.close();
+                                    } catch (IOException ignored) {
+                                    }
+                                }
                             }
                             workersLatch.countDown();
                         }
@@ -201,7 +225,16 @@ public final class MultiSourceDownloader implements Runnable {
                     worker.start();
                 }
 
-                workersLatch.await(config.transferVerifyTimeoutMillis(), TimeUnit.MILLISECONDS);
+                boolean finishedInTime = workersLatch.await(config.transferVerifyTimeoutMillis(), TimeUnit.MILLISECONDS);
+                if (!finishedInTime) {
+                    session.cancel(); // Abort all worker sockets
+                    for (Thread t : workerThreads) {
+                        try {
+                            t.join(1000);
+                        } catch (InterruptedException ignored) {
+                        }
+                    }
+                }
             } // Writer closed before whole-file verification
 
             if (session.isCancelled()) {

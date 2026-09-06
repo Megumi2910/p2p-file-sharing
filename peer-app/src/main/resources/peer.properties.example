@@ -1,0 +1,19 @@
+# Every peer needs a unique ID. The display name is just for the GUI.
+peer.id=peer-a
+peer.name=Alice
+
+# TCP port where OTHER PEERS connect directly to this application.
+peer.port=6001
+
+# Tracker runs on the Windows host in the planned VM demo.
+tracker.host=192.168.56.1
+tracker.port=5000
+
+# Received files are stored here, relative to the directory where the JAR is run.
+download.dir=downloads
+
+# 1 MiB chunks.
+chunk.size.bytes=1048576
+
+# false = show Accept/Reject dialog for every incoming file.
+transfer.autoAccept=false

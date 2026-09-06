@@ -1,0 +1,102 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - link "P2P File Sharing" [ref=e4] [cursor=pointer]:
+      - /url: index.html
+    - text: Offline project handbook
+    - navigation "Handbook" [ref=e5]:
+      - link "Start here" [ref=e6] [cursor=pointer]:
+        - /url: index.html
+      - link "Core concepts" [ref=e7] [cursor=pointer]:
+        - /url: concepts.html
+      - link "Architecture" [ref=e8] [cursor=pointer]:
+        - /url: architecture.html
+      - link "Transfer lifecycle" [ref=e9] [cursor=pointer]:
+        - /url: transfer-lifecycle.html
+      - link "Protocol reference" [ref=e10] [cursor=pointer]:
+        - /url: protocol-reference.html
+      - link "Setup & configuration" [ref=e11] [cursor=pointer]:
+        - /url: setup-and-configuration.html
+      - link "User guide & demo" [ref=e12] [cursor=pointer]:
+        - /url: user-guide-and-demo.html
+      - link "Code guide" [ref=e13] [cursor=pointer]:
+        - /url: code-guide.html
+      - link "Testing & evidence" [ref=e14] [cursor=pointer]:
+        - /url: testing-and-evidence.html
+      - link "Troubleshooting" [ref=e15] [cursor=pointer]:
+        - /url: troubleshooting.html
+      - link "Limitations & roadmap" [ref=e16] [cursor=pointer]:
+        - /url: limitations-and-roadmap.html
+      - link "Maintenance" [ref=e17] [cursor=pointer]:
+        - /url: maintenance.html
+      - link "Changelog" [ref=e18] [cursor=pointer]:
+        - /url: changelog.html
+  - main [ref=e19]:
+    - generic [ref=e20]: Start here · verified 6 September 2026
+    - heading "Understand the system before changing it." [level=1] [ref=e21]
+    - paragraph [ref=e22]: This is a university-scale hybrid peer-to-peer file sharing application. A central tracker tells peers how to find one another; the peers then send file bytes directly over TCP. The central engineering pressure is keeping discovery separate from transfer while proving that every received byte belongs to the intended file.
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - generic [ref=e25]: Current
+        - heading "Working baseline" [level=3] [ref=e26]
+        - paragraph [ref=e27]: Registration, discovery, accept/reject, sequential chunk transfer, per-chunk acknowledgements, and whole-file verification exist.
+      - generic [ref=e28]:
+        - generic [ref=e29]: Known limits
+        - heading "Reliability work remains" [level=3] [ref=e30]
+        - paragraph [ref=e31]: Reads have no timeout, concurrent destination selection can collide, and protocol identity checks are incomplete.
+      - generic [ref=e32]:
+        - generic [ref=e33]: Unverified
+        - heading "Environment proof" [level=3] [ref=e34]
+        - paragraph [ref=e35]: Maven packaging, the real Swing flow, and Windows-to-Ubuntu VM connectivity were not executed in the latest assessment.
+    - heading "The shape in one minute" [level=2] [ref=e36]
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]: Alice peerUbuntu VM
+        - generic [ref=e40]: register / discover ↔
+        - generic [ref=e41]: TrackerWindows :5000
+        - generic [ref=e42]: ↔ register / discover
+        - generic [ref=e43]: Bob peerUbuntu VM
+      - paragraph [ref=e44]: After discovery, Alice opens a separate socket directly to Bob. The tracker never receives the file payload.
+    - heading "Choose a reading path" [level=2] [ref=e45]
+    - generic [ref=e46]:
+      - article [ref=e47]:
+        - heading "I am learning" [level=3] [ref=e48]
+        - paragraph [ref=e49]: Begin with networking and integrity vocabulary, then walk through a transfer.
+        - paragraph [ref=e50]:
+          - link "Learn the concepts →" [ref=e51] [cursor=pointer]:
+            - /url: concepts.html
+      - article [ref=e52]:
+        - heading "I need to run the demo" [level=3] [ref=e53]
+        - paragraph [ref=e54]: Prepare Java, Maven, VM networking, two peer configurations, and a verified demonstration.
+        - paragraph [ref=e55]:
+          - link "Set up the system →" [ref=e56] [cursor=pointer]:
+            - /url: setup-and-configuration.html
+      - article [ref=e57]:
+        - heading "I will change the code" [level=3] [ref=e58]
+        - paragraph [ref=e59]: Study ownership, call paths, protocol contracts, tests, and the mandatory documentation workflow.
+        - paragraph [ref=e60]:
+          - link "Navigate the code →" [ref=e61] [cursor=pointer]:
+            - /url: code-guide.html
+      - article [ref=e62]:
+        - heading "Something failed" [level=3] [ref=e63]
+        - paragraph [ref=e64]: Start from the symptom and collect evidence before restarting components.
+        - paragraph [ref=e65]:
+          - link "Diagnose a failure →" [ref=e66] [cursor=pointer]:
+            - /url: troubleshooting.html
+    - heading "What “current” means" [level=2] [ref=e67]
+    - paragraph [ref=e68]:
+      - text: Claims marked
+      - generic [ref=e69]: Current
+      - text: are backed by active source or a focused runtime check.
+      - generic [ref=e70]: Planned
+      - text: means the roadmap describes the behavior but the active protocol does not implement it.
+      - generic [ref=e71]: Known limit
+      - text: identifies a reproduced defect or a clear gap in the active path.
+      - generic [ref=e72]: Unverified
+      - text: means the handbook deliberately avoids presenting an instruction or simulation as proof.
+    - generic [ref=e73]:
+      - strong [ref=e74]: Offline by design.
+      - text: Keep this folder together and open
+      - code [ref=e75]: docs/index.html
+      - text: . The pages use only local HTML, CSS, JavaScript, and SVG; there is no documentation build step.
+    - 'link "Next: Core concepts →" [ref=e77] [cursor=pointer]':
+      - /url: concepts.html

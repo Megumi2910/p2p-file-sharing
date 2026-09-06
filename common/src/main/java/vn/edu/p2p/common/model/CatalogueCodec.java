@@ -70,8 +70,10 @@ public final class CatalogueCodec {
                 out.writeLong(file.totalChunks());
 
                 List<PeerInfo> providers = result.providers();
-                out.writeInt(providers.size());
-                for (PeerInfo peer : providers) {
+                int providerCount = Math.min(providers.size(), vn.edu.p2p.common.protocol.TrackerProtocol.MAX_ACTIVE_PEERS);
+                out.writeInt(providerCount);
+                for (int p = 0; p < providerCount; p++) {
+                    PeerInfo peer = providers.get(p);
                     out.writeUTF(peer.peerId());
                     out.writeUTF(peer.displayName());
                     out.writeUTF(peer.host());
@@ -104,8 +106,8 @@ public final class CatalogueCodec {
                 }
 
                 int providerCount = in.readInt();
-                if (providerCount < 0 || providerCount > 1000) {
-                    throw new IOException("Invalid provider count: " + providerCount);
+                if (providerCount < 0 || providerCount > vn.edu.p2p.common.protocol.TrackerProtocol.MAX_ACTIVE_PEERS) {
+                    throw new IOException("Provider count exceeds protocol maximum (" + vn.edu.p2p.common.protocol.TrackerProtocol.MAX_ACTIVE_PEERS + "): " + providerCount);
                 }
                 List<PeerInfo> providers = new ArrayList<>(providerCount);
                 for (int p = 0; p < providerCount; p++) {

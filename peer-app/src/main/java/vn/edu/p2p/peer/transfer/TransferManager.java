@@ -146,7 +146,7 @@ public final class TransferManager implements AutoCloseable {
                                 java.util.Map.of("fileId", targetFile.fileId(), "fileName", targetFile.fileName())
                         ));
 
-                        new FileReceiver(socket, config, prompt, listener, session).run();
+                        new FileReceiver(socket, config, prompt, listener, session, targetFile.fileId()).run();
                     } catch (Exception ex) {
                         if (socket != null && !socket.isClosed()) {
                             try {

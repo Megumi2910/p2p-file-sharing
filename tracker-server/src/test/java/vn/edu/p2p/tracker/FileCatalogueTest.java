@@ -59,4 +59,27 @@ class FileCatalogueTest {
         assertEquals(1, remaining.get(0).providers().size());
         assertEquals("Bob", remaining.get(0).providers().get(0).displayName());
     }
+    @Test
+    void testRepublishReplacesSnapshot() {
+        FileCatalogue catalogue = new FileCatalogue();
+        PeerRegistry registry = new PeerRegistry();
+        PeerInfo alice = new PeerInfo("alice-id", "Alice", "10.0.0.1", 6001);
+        registry.register(alice);
+
+        FileRecord file1 = new FileRecord(SHA_1, "file1.txt", 100, 1024, 1);
+        FileRecord file2 = new FileRecord(SHA_2, "file2.txt", 200, 1024, 1);
+
+        // First publish: file1 and file2
+        catalogue.publishFiles("alice-id", List.of(file1, file2));
+        assertEquals(2, catalogue.search("", registry).size());
+
+        // Alice unshares file2 and republishes only file1
+        catalogue.publishFiles("alice-id", List.of(file1));
+        List<SearchResult> results = catalogue.search("", registry);
+        assertEquals(1, results.size(), "Republishing should replace previous snapshot");
+        assertEquals("file1.txt", results.get(0).file().fileName());
+
+        // Search for file2 specifically returns empty
+        assertTrue(catalogue.search("file2", registry).isEmpty());
+    }
 }

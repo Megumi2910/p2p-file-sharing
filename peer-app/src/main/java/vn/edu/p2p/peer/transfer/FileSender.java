@@ -54,7 +54,7 @@ public final class FileSender implements Runnable {
     @Override
     public void run() {
         String transferId = UUID.randomUUID().toString();
-        String fileName = file.getFileName().toString();
+        String fileName = vn.edu.p2p.peer.util.FileNameUtil.safeBaseName(file.getFileName().toString());
         long fileSize = 0;
         long transferred = 0;
 
@@ -86,13 +86,15 @@ public final class FileSender implements Runnable {
             boolean newSocketCreated = false;
             if (socket == null) {
                 socket = new Socket();
-                session.attach(socket);
-                socket.connect(new InetSocketAddress(target.host(), target.port()), 7_000);
                 newSocketCreated = true;
+                session.attach(socket);
             }
-            socket.setTcpNoDelay(true);
 
             try {
+                if (newSocketCreated) {
+                    socket.connect(new InetSocketAddress(target.host(), target.port()), 7_000);
+                }
+                socket.setTcpNoDelay(true);
                 FrameIO.write(socket.getOutputStream(), new Frame(MessageType.FILE_OFFER, metadata.toHeaders()));
                 update(transferId, fileName, TransferStatus.WAITING_FOR_ACCEPTANCE, 0, fileSize, 0,
                         "Waiting for " + targetDisplayName + "...");

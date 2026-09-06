@@ -124,9 +124,13 @@ public final class TrackerServer implements AutoCloseable {
 
                 switch (frame.type()) {
                     case TRACKER_REGISTER -> {
+                        if (frame.payload().length != 0) {
+                            sendError(socket, "TRACKER_REGISTER must have empty payload");
+                            continue;
+                        }
                         if (ownedPeer != null) {
                             sendError(socket, "Already registered");
-                            return; // Session terminates and releases original registration
+                            return;
                         }
                         String peerId = frame.requireHeader("peerId");
                         String displayName = frame.requireHeader("displayName");
@@ -150,6 +154,10 @@ public final class TrackerServer implements AutoCloseable {
                         System.out.println("[TRACKER] Registered " + peer);
                     }
                     case TRACKER_LIST_PEERS -> {
+                        if (frame.payload().length != 0) {
+                            sendError(socket, "TRACKER_LIST_PEERS must have empty payload");
+                            continue;
+                        }
                         if (ownedPeer == null) {
                             sendError(socket, "Register first");
                             continue;
@@ -176,12 +184,19 @@ public final class TrackerServer implements AutoCloseable {
                         System.out.println("[TRACKER] Published " + files.size() + " files from " + ownedPeer.peerId());
                     }
                     case TRACKER_SEARCH -> {
+                        if (frame.payload().length != 0) {
+                            sendError(socket, "TRACKER_SEARCH must have empty payload");
+                            continue;
+                        }
                         if (ownedPeer == null) {
                             sendError(socket, "Register first");
                             continue;
                         }
                         String query = frame.headers().getOrDefault("query", "");
                         var results = catalogue.search(query, registry);
+                        if (results.size() > 500) {
+                            results = results.subList(0, 500);
+                        }
                         byte[] payload = vn.edu.p2p.common.model.CatalogueCodec.encodeSearchResults(results);
                         FrameIO.write(socket.getOutputStream(), new Frame(
                                 MessageType.TRACKER_SEARCH_RESULTS,
@@ -190,6 +205,9 @@ public final class TrackerServer implements AutoCloseable {
                         ));
                     }
                     case TRACKER_DISCONNECT -> {
+                        if (frame.payload().length != 0) {
+                            sendError(socket, "TRACKER_DISCONNECT must have empty payload");
+                        }
                         return;
                     }
                     default -> sendError(socket, "Unsupported tracker message: " + frame.type());
@@ -201,8 +219,8 @@ public final class TrackerServer implements AutoCloseable {
             System.err.println("[TRACKER] Client error: " + ex.getMessage());
         } finally {
             if (ownedPeer != null) {
-                catalogue.removePeer(ownedPeer.peerId());
                 registry.unregister(ownedPeer);
+                catalogue.removePeer(ownedPeer.peerId());
             }
         }
     }

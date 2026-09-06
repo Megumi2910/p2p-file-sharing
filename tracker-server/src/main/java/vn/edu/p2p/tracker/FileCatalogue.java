@@ -6,6 +6,7 @@ import vn.edu.p2p.common.model.SearchResult;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -23,11 +24,31 @@ public final class FileCatalogue {
     }
 
     private final ConcurrentMap<String, Entry> entries = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Set<String>> peerFiles = new ConcurrentHashMap<>();
 
     public void publishFiles(String peerId, List<FileRecord> files) {
         if (peerId == null || files == null) {
             return;
         }
+
+        Set<String> newIds = new HashSet<>(files.size());
+        for (FileRecord f : files) {
+            newIds.add(f.fileId());
+        }
+
+        Set<String> currentTracked = ConcurrentHashMap.newKeySet();
+        currentTracked.addAll(newIds);
+        Set<String> oldIds = peerFiles.put(peerId, currentTracked);
+
+        // Prune associations no longer present in the updated file list
+        if (oldIds != null) {
+            for (String oldId : oldIds) {
+                if (!newIds.contains(oldId)) {
+                    removeProviderFromFile(oldId, peerId);
+                }
+            }
+        }
+
         for (FileRecord file : files) {
             entries.compute(file.fileId(), (id, existing) -> {
                 Entry entry = existing != null ? existing : new Entry(file);
@@ -41,9 +62,18 @@ public final class FileCatalogue {
         if (peerId == null) {
             return;
         }
-        entries.entrySet().removeIf(e -> {
-            e.getValue().providerPeerIds.remove(peerId);
-            return e.getValue().providerPeerIds.isEmpty();
+        Set<String> files = peerFiles.remove(peerId);
+        if (files != null) {
+            for (String fileId : files) {
+                removeProviderFromFile(fileId, peerId);
+            }
+        }
+    }
+
+    private void removeProviderFromFile(String fileId, String peerId) {
+        entries.computeIfPresent(fileId, (id, entry) -> {
+            entry.providerPeerIds.remove(peerId);
+            return entry.providerPeerIds.isEmpty() ? null : entry;
         });
     }
 

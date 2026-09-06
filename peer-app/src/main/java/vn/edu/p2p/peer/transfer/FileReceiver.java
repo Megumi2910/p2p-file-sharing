@@ -25,14 +25,21 @@ public final class FileReceiver implements Runnable {
     private final IncomingFilePrompt prompt;
     private final TransferListener listener;
     private final TransferSession session;
+    private final String expectedFileId;
 
     public FileReceiver(Socket socket, AppConfig config, IncomingFilePrompt prompt,
                         TransferListener listener, TransferSession session) {
+        this(socket, config, prompt, listener, session, null);
+    }
+
+    public FileReceiver(Socket socket, AppConfig config, IncomingFilePrompt prompt,
+                        TransferListener listener, TransferSession session, String expectedFileId) {
         this.socket = socket;
         this.config = config;
         this.prompt = prompt;
         this.listener = listener;
         this.session = session;
+        this.expectedFileId = expectedFileId;
     }
 
     @Override
@@ -54,6 +61,15 @@ public final class FileReceiver implements Runnable {
 
             socket.setSoTimeout(config.transferReadTimeoutMillis());
             Frame offer = FrameIO.read(socket.getInputStream(), 0);
+            if (offer.type() == MessageType.FILE_REJECT) {
+                String reason = offer.headers().getOrDefault("reason", "Provider rejected file request");
+                String tid = offer.headers().getOrDefault("transferId", java.util.UUID.randomUUID().toString());
+                listener.onUpdate(new TransferUpdate(
+                        tid, "Requested file", "Provider", TransferDirection.RECEIVE,
+                        TransferStatus.REJECTED, 0, 0, 0, reason
+                ));
+                return;
+            }
             if (offer.type() == MessageType.FILE_REQUEST) {
                 String requestedFileId = offer.requireHeader("fileId");
                 Path source = findSharedFile(requestedFileId);
@@ -68,11 +84,19 @@ public final class FileReceiver implements Runnable {
                 return;
             }
             if (offer.type() != MessageType.FILE_OFFER) {
-                throw new IOException("Expected FILE_OFFER or FILE_REQUEST, got " + offer.type());
+                throw new IOException("Expected FILE_OFFER, FILE_REQUEST, or FILE_REJECT, got " + offer.type());
             }
             metadata = FileMetadata.fromOffer(offer);
             FileNameUtil.safeBaseName(metadata.fileName());
 
+            if (expectedFileId != null && !expectedFileId.equalsIgnoreCase(metadata.fileId())) {
+                FrameIO.write(socket.getOutputStream(), new Frame(
+                        MessageType.FILE_REJECT,
+                        Map.of("transferId", metadata.transferId(), "reason", "Offered fileId does not match requested fileId")
+                ));
+                update(metadata, TransferStatus.FAILED, 0, 0, "Offered fileId mismatch: expected " + expectedFileId + ", got " + metadata.fileId());
+                return;
+            }
             boolean accepted = config.autoAccept() || prompt.accept(
                     metadata,
                     (InetSocketAddress) socket.getRemoteSocketAddress(),
@@ -321,7 +345,6 @@ public final class FileReceiver implements Runnable {
                 status, bytes, metadata.fileSize(), speed, message
         ));
     }
-
     private Path findSharedFile(String fileId) {
         Path shared = config.sharedDir();
         if (!Files.isDirectory(shared)) {
@@ -329,10 +352,20 @@ public final class FileReceiver implements Runnable {
         }
         try (var stream = Files.newDirectoryStream(shared)) {
             for (Path p : stream) {
-                if (Files.isRegularFile(p) && Files.isReadable(p)) {
-                    if (fileId.equalsIgnoreCase(HashUtil.sha256(p))) {
-                        return p;
-                    }
+                if (!Files.isRegularFile(p) || !Files.isReadable(p)) {
+                    continue;
+                }
+                String name = p.getFileName().toString();
+                if (name.startsWith(".p2p-") || name.endsWith(".part") || name.endsWith(".meta")) {
+                    continue;
+                }
+                try {
+                    FileNameUtil.safeBaseName(name);
+                } catch (Exception ex) {
+                    continue;
+                }
+                if (fileId.equalsIgnoreCase(HashUtil.sha256(p))) {
+                    return p;
                 }
             }
         } catch (Exception ignored) {

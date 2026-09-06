@@ -155,9 +155,16 @@ class CatalogueSearchIT {
 
         // 3. Alice disconnects -> Bob searches again -> Alice's files are pruned!
         runtimeAlice.close();
-        Thread.sleep(200);
-
-        List<SearchResult> postDisconnectSearch = runtimeBob.searchFiles("distributed");
+        long deadline = System.currentTimeMillis() + 5000;
+        List<SearchResult> postDisconnectSearch = null;
+        while (System.currentTimeMillis() < deadline) {
+            postDisconnectSearch = runtimeBob.searchFiles("distributed");
+            if (postDisconnectSearch.isEmpty()) {
+                break;
+            }
+            Thread.sleep(50);
+        }
+        assertNotNull(postDisconnectSearch);
         assertTrue(postDisconnectSearch.isEmpty(), "Stale files must be pruned when provider disconnects");
     }
 }

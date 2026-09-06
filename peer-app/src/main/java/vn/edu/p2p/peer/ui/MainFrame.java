@@ -43,6 +43,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final JButton refreshButton = new JButton("Refresh peers");
     private final JButton sendButton = new JButton("Send file...");
     private final JTabbedPane tabbedPane = new JTabbedPane();
+    private long searchSequence = 0;
 
     public MainFrame(PeerRuntime runtime) {
         super("P2P File Sharing - " + runtime.config().displayName());
@@ -109,6 +110,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     public void setStarting(boolean starting) {
         refreshButton.setEnabled(!starting);
         sendButton.setEnabled(!starting);
+        searchField.setEnabled(!starting);
         searchButton.setEnabled(!starting);
         downloadButton.setEnabled(!starting);
     }
@@ -145,6 +147,7 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     public void performSearch() {
         String query = searchField.getText();
+        final long currentSeq = ++searchSequence;
         new SwingWorker<List<SearchResult>, Void>() {
             @Override
             protected List<SearchResult> doInBackground() throws Exception {
@@ -153,6 +156,9 @@ public final class MainFrame extends JFrame implements TransferListener {
 
             @Override
             protected void done() {
+                if (currentSeq != searchSequence) {
+                    return;
+                }
                 try {
                     List<SearchResult> results = get();
                     searchModel.setResults(results);

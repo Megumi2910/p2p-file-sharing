@@ -21,6 +21,7 @@ public enum MessageType {
     TRANSFER_COMPLETE(105),
     VERIFY_RESULT(106),
     FILE_REQUEST(107),
+    CHUNK_REQUEST(108),
 
     ERROR(900);
 

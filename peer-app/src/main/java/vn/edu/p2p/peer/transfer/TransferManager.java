@@ -6,6 +6,7 @@ import vn.edu.p2p.peer.config.AppConfig;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -159,6 +160,32 @@ public final class TransferManager implements AutoCloseable {
                                 TransferDirection.RECEIVE, TransferStatus.FAILED, 0, targetFile.fileSize(), 0,
                                 ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName()
                         ));
+                    } finally {
+                        synchronized (lifecycleLock) {
+                            activeSessions.remove(session);
+                        }
+                    }
+                });
+            } catch (RejectedExecutionException ex) {
+                activeSessions.remove(session);
+                throw ex;
+            }
+        }
+    }
+    public void downloadMultiSource(List<PeerInfo> providers, vn.edu.p2p.common.model.FileRecord targetFile) {
+        if (closed) {
+            throw new RejectedExecutionException("TransferManager is closed");
+        }
+        TransferSession session = new TransferSession();
+        synchronized (lifecycleLock) {
+            if (closed) {
+                throw new RejectedExecutionException("TransferManager is closed");
+            }
+            activeSessions.add(session);
+            try {
+                executor.submit(() -> {
+                    try {
+                        new MultiSourceDownloader(providers, targetFile, config, listener, session).run();
                     } finally {
                         synchronized (lifecycleLock) {
                             activeSessions.remove(session);

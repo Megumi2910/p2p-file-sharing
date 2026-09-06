@@ -106,8 +106,7 @@ public final class PeerRuntime implements AutoCloseable {
         if (result == null || result.providers().isEmpty()) {
             throw new IllegalArgumentException("No live providers available for file: " + (result != null ? result.file().fileName() : "null"));
         }
-        PeerInfo provider = result.providers().get(0);
-        transferManager.requestDownload(provider, result.file());
+        transferManager.downloadMultiSource(result.providers(), result.file());
     }
 
     public AppConfig config() {

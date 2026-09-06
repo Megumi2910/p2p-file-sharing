@@ -83,8 +83,12 @@ public final class FileReceiver implements Runnable {
                 new FileSender(socket, "Downloader", source, config, listener, session).run();
                 return;
             }
+            if (offer.type() == MessageType.CHUNK_REQUEST) {
+                serveChunkRequests(socket, offer);
+                return;
+            }
             if (offer.type() != MessageType.FILE_OFFER) {
-                throw new IOException("Expected FILE_OFFER, FILE_REQUEST, or FILE_REJECT, got " + offer.type());
+                throw new IOException("Expected FILE_OFFER, FILE_REQUEST, CHUNK_REQUEST, or FILE_REJECT, got " + offer.type());
             }
             metadata = FileMetadata.fromOffer(offer);
             FileNameUtil.safeBaseName(metadata.fileName());
@@ -345,6 +349,7 @@ public final class FileReceiver implements Runnable {
                 status, bytes, metadata.fileSize(), speed, message
         ));
     }
+
     private Path findSharedFile(String fileId) {
         Path shared = config.sharedDir();
         if (!Files.isDirectory(shared)) {
@@ -371,5 +376,66 @@ public final class FileReceiver implements Runnable {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    private void serveChunkRequests(Socket socket, Frame initialRequest) {
+        Frame request = initialRequest;
+        try {
+            while (true) {
+                if (session.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                if (request.type() != MessageType.CHUNK_REQUEST) {
+                    return;
+                }
+                String fileId = request.requireHeader("fileId");
+                long chunkIndex = Long.parseLong(request.requireHeader("chunkIndex"));
+                String tid = request.headers().getOrDefault("transferId", "pull-session");
+
+                Path source = findSharedFile(fileId);
+                if (source == null) {
+                    FrameIO.write(socket.getOutputStream(), new Frame(
+                            MessageType.FILE_REJECT,
+                            Map.of("reason", "Requested file not found in shared folder", "transferId", tid)
+                    ));
+                    return;
+                }
+
+                long fileSize = Files.size(source);
+                int chunkSize = config.chunkSizeBytes();
+                long offset = chunkIndex * (long) chunkSize;
+                if (offset < 0 || (fileSize > 0 && offset >= fileSize) || (fileSize == 0 && chunkIndex > 0)) {
+                    FrameIO.write(socket.getOutputStream(), new Frame(
+                            MessageType.FILE_REJECT,
+                            Map.of("reason", "Chunk index out of bounds: " + chunkIndex, "transferId", tid)
+                    ));
+                    return;
+                }
+
+                int length = fileSize == 0 ? 0 : (int) Math.min(chunkSize, fileSize - offset);
+                byte[] buffer = new byte[length];
+                if (length > 0) {
+                    try (RandomAccessFile raf = new RandomAccessFile(source.toFile(), "r")) {
+                        raf.seek(offset);
+                        raf.readFully(buffer);
+                    }
+                }
+
+                String chunkSha256 = HashUtil.sha256(buffer);
+                Map<String, String> headers = new LinkedHashMap<>();
+                headers.put("transferId", tid);
+                headers.put("chunkIndex", Long.toString(chunkIndex));
+                headers.put("offset", Long.toString(offset));
+                headers.put("chunkSha256", chunkSha256);
+
+                FrameIO.write(socket.getOutputStream(), new Frame(MessageType.CHUNK_DATA, headers, buffer));
+
+                socket.setSoTimeout(config.transferReadTimeoutMillis());
+                request = FrameIO.read(socket.getInputStream(), 0);
+            }
+        } catch (java.io.EOFException ignored) {
+        } catch (Exception ex) {
+            System.err.println("[PEER] Pull chunk serving ended: " + ex.getMessage());
+        }
     }
 }

@@ -6,9 +6,13 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class PeerListCodec {
+    private static final int MAX_PARSER_PEERS = 10_000;
+
     private PeerListCodec() {
     }
 
@@ -29,14 +33,29 @@ public final class PeerListCodec {
     public static List<PeerInfo> decode(byte[] payload) throws IOException {
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(payload))) {
             int count = in.readInt();
-            if (count < 0 || count > 10_000) {
+            if (count < 0 || count > MAX_PARSER_PEERS) {
                 throw new IOException("Invalid peer count: " + count);
             }
 
             List<PeerInfo> peers = new ArrayList<>(count);
+            Set<String> seenIds = new HashSet<>(count);
             for (int i = 0; i < count; i++) {
-                peers.add(new PeerInfo(in.readUTF(), in.readUTF(), in.readUTF(), in.readInt()));
+                PeerInfo peer;
+                try {
+                    peer = new PeerInfo(in.readUTF(), in.readUTF(), in.readUTF(), in.readInt());
+                } catch (IllegalArgumentException ex) {
+                    throw new IOException("Invalid peer record at index " + i + ": " + ex.getMessage(), ex);
+                }
+                if (!seenIds.add(peer.peerId())) {
+                    throw new IOException("Duplicate peerId in peer list: " + peer.peerId());
+                }
+                peers.add(peer);
             }
+
+            if (in.available() > 0) {
+                throw new IOException("Trailing bytes in peer list payload");
+            }
+
             return peers;
         }
     }

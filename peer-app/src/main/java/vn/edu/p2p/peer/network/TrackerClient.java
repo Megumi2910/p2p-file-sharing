@@ -5,6 +5,7 @@ import vn.edu.p2p.common.model.PeerListCodec;
 import vn.edu.p2p.common.protocol.Frame;
 import vn.edu.p2p.common.protocol.FrameIO;
 import vn.edu.p2p.common.protocol.MessageType;
+import vn.edu.p2p.common.protocol.TrackerProtocol;
 import vn.edu.p2p.peer.config.AppConfig;
 
 import java.io.IOException;
@@ -15,62 +16,123 @@ import java.util.Map;
 
 public final class TrackerClient implements AutoCloseable {
     private final AppConfig config;
-    private Socket socket;
+    private final Object requestLock = new Object();
+    private final Object lifecycleLock = new Object();
+    private volatile Socket socket;
+    private volatile boolean closed = false;
 
     public TrackerClient(AppConfig config) {
         this.config = config;
     }
 
-    public synchronized String connectAndRegister() throws IOException {
-        socket = new Socket();
-        socket.connect(new InetSocketAddress(config.trackerHost(), config.trackerPort()), 5_000);
+    public String connectAndRegister() throws IOException {
+        synchronized (requestLock) {
+            Socket newSocket = new Socket();
+            synchronized (lifecycleLock) {
+                if (closed) {
+                    throw new IOException("TrackerClient is closed");
+                }
+                this.socket = newSocket;
+            }
 
-        FrameIO.write(socket.getOutputStream(), new Frame(
-                MessageType.TRACKER_REGISTER,
-                Map.of(
-                        "peerId", config.peerId(),
-                        "displayName", config.displayName(),
-                        "peerPort", Integer.toString(config.peerPort())
-                )
-        ));
+            try {
+                newSocket.connect(new InetSocketAddress(config.trackerHost(), config.trackerPort()), 5_000);
+                synchronized (lifecycleLock) {
+                    if (closed) {
+                        try {
+                            newSocket.close();
+                        } catch (IOException ignored) {
+                        }
+                        throw new IOException("TrackerClient was closed during connect");
+                    }
+                }
+                newSocket.setSoTimeout(config.trackerReadTimeoutMillis());
 
-        Frame response = FrameIO.read(socket.getInputStream());
-        if (response.type() != MessageType.TRACKER_REGISTER_OK) {
-            throw new IOException("Tracker registration failed: " + response.type());
+                FrameIO.write(newSocket.getOutputStream(), new Frame(
+                        MessageType.TRACKER_REGISTER,
+                        Map.of(
+                                "peerId", config.peerId(),
+                                "displayName", config.displayName(),
+                                "peerPort", Integer.toString(config.peerPort())
+                        )
+                ));
+
+                Frame response = FrameIO.read(newSocket.getInputStream(), 0);
+                if (response.type() != MessageType.TRACKER_REGISTER_OK) {
+                    throw new IOException("Tracker registration failed: " + response.type());
+                }
+                return response.requireHeader("host");
+            } catch (Exception ex) {
+                synchronized (lifecycleLock) {
+                    try {
+                        newSocket.close();
+                    } catch (IOException ignored) {
+                    }
+                    this.socket = null;
+                }
+                if (ex instanceof IOException ioEx) {
+                    throw ioEx;
+                }
+                throw new IOException("Tracker registration failed: " + ex.getMessage(), ex);
+            }
         }
-        return response.requireHeader("host");
     }
 
-    public synchronized List<PeerInfo> listPeers() throws IOException {
-        ensureConnected();
-        FrameIO.write(socket.getOutputStream(), new Frame(MessageType.TRACKER_LIST_PEERS));
-        Frame response = FrameIO.read(socket.getInputStream());
-        if (response.type() == MessageType.ERROR) {
-            throw new IOException(response.requireHeader("message"));
-        }
-        if (response.type() != MessageType.TRACKER_PEER_LIST) {
-            throw new IOException("Unexpected tracker response: " + response.type());
-        }
-        return PeerListCodec.decode(response.payload());
-    }
+    public List<PeerInfo> listPeers() throws IOException {
+        synchronized (requestLock) {
+            Socket currentSocket = this.socket;
+            if (closed || currentSocket == null || currentSocket.isClosed()) {
+                throw new IOException("Not connected to tracker");
+            }
 
-    private void ensureConnected() throws IOException {
-        if (socket == null || socket.isClosed()) {
-            throw new IOException("Not connected to tracker");
+            try {
+                currentSocket.setSoTimeout(config.trackerReadTimeoutMillis());
+                FrameIO.write(currentSocket.getOutputStream(), new Frame(MessageType.TRACKER_LIST_PEERS));
+                Frame response = FrameIO.read(currentSocket.getInputStream(), TrackerProtocol.MAX_PEER_LIST_PAYLOAD_BYTES);
+                if (response.type() == MessageType.ERROR) {
+                    throw new IOException(response.requireHeader("message"));
+                }
+                if (response.type() != MessageType.TRACKER_PEER_LIST) {
+                    throw new IOException("Unexpected tracker response: " + response.type());
+                }
+                int declaredCount = Integer.parseInt(response.requireHeader("count"));
+                if (declaredCount < 0 || declaredCount > TrackerProtocol.MAX_ACTIVE_PEERS) {
+                    throw new IOException("Tracker declared count outside protocol bounds: " + declaredCount);
+                }
+                List<PeerInfo> peers = PeerListCodec.decode(response.payload());
+                if (peers.size() != declaredCount) {
+                    throw new IOException("Mismatched peer count: header=" + declaredCount + ", decoded=" + peers.size());
+                }
+                return peers;
+            } catch (Exception ex) {
+                synchronized (lifecycleLock) {
+                    try {
+                        currentSocket.close();
+                    } catch (IOException ignored) {
+                    }
+                    this.socket = null;
+                }
+                if (ex instanceof IOException ioEx) {
+                    throw ioEx;
+                }
+                throw new IOException("Failed to list peers: " + ex.getMessage(), ex);
+            }
         }
     }
 
     @Override
-    public synchronized void close() throws IOException {
-        if (socket == null) {
-            return;
+    public void close() throws IOException {
+        Socket s;
+        synchronized (lifecycleLock) {
+            closed = true;
+            s = this.socket;
+            this.socket = null;
         }
-        if (!socket.isClosed()) {
+        if (s != null && !s.isClosed()) {
             try {
-                FrameIO.write(socket.getOutputStream(), new Frame(MessageType.TRACKER_DISCONNECT));
+                s.close();
             } catch (IOException ignored) {
             }
-            socket.close();
         }
     }
 }

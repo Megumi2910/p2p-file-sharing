@@ -42,6 +42,7 @@ Open [`docs/index.html`](docs/index.html) directly in a browser. The offline han
 
 - [Setup and configuration](docs/setup-and-configuration.html)
 - [Protocol reference](docs/protocol-reference.html)
+- [Project foundation and execution plan](docs/plans/foundation-plan.html)
 - [Known limitations and roadmap](docs/limitations-and-roadmap.html)
 - [Documentation maintenance contract](docs/maintenance.html)
 

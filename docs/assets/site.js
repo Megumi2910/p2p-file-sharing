@@ -20,12 +20,12 @@ function renderChunks() {
 
 const transferPaths = {
   accept: [
-    ['Prepare','Sender calculates the complete SHA-256 and metadata.'],['Offer','Sender opens a direct TCP connection and sends FILE_OFFER.'],['Accept','Receiver chooses a safe destination and replies FILE_ACCEPT.'],['Transfer','Each CHUNK_DATA is hashed, written by offset, and acknowledged.'],['Verify','TRANSFER_COMPLETE triggers whole-file SHA-256 verification.'],['Complete','The .part file is renamed and both sides report COMPLETED.']
+    ['Prepare','Sender calculates the complete SHA-256 and metadata.'],['Offer','Sender opens a direct TCP connection and sends FILE_OFFER.'],['Accept','Receiver checks usable space, stages an owned .p2p-*.part file, and replies FILE_ACCEPT.'],['Transfer','Each CHUNK_DATA is hashed, written by offset, and acknowledged.'],['Verify','TRANSFER_COMPLETE triggers whole-file SHA-256 verification.'],['Complete','The final entry is atomically published via hard link (Files.createLink), temporary .part unlinked, and both sides report COMPLETED.']
   ],
   reject: [['Prepare','Sender calculates metadata.'],['Offer','Receiver displays the incoming-file prompt.'],['Reject','Receiver sends FILE_REJECT; no destination file is created.']],
   corrupt: [['Offer','Receiver accepts.'],['Chunk','A chunk hash does not match its payload.'],['Retry','Receiver sends CHUNK_ACK with status RETRY.'],['Resend','Sender retries the same chunk, up to three attempts.']],
-  interrupt: [['Offer','Receiver accepts.'],['Transfer','Some bytes are written to a .part file.'],['Disconnect','A blocking read eventually gets EOF if the connection closes.'],['Failed','The UI reports FAILED and the .part file remains; automatic resume is not implemented.']],
-  stall: [['Connect','The socket connects.'],['Wait','A peer or tracker stops responding without closing the connection.'],['Stalled','Current reads have no timeout, so the operation may wait indefinitely.']]
+  interrupt: [['Offer','Receiver accepts.'],['Transfer','Bytes are written to an owned .p2p-*.part file.'],['Disconnect','Socket disconnects or EOF is reached.'],['Failed','The UI reports FAILED with confirmed byte counts; the uniquely owned .part file remains for inspection.']],
+  stall: [['Connect','The socket connects.'],['Wait','An endpoint stays connected but silent.'],['Timeout','Phase read inactivity timeout triggers (15s read, 120s prompt, 135s response), terminating the operation cleanly without blocking indefinitely.']]
 };
 function renderTransfer() {
   if (!$('#transfer-output')) return;

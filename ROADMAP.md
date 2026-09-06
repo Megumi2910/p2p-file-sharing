@@ -2,6 +2,7 @@
 
 The maintained roadmap, dependencies, current issue register, and distinction between implemented and planned behavior live in the offline handbook:
 
+- [Project foundation and execution plan](docs/plans/foundation-plan.html)
 - [Limitations and roadmap](docs/limitations-and-roadmap.html)
 - [Testing and evidence](docs/testing-and-evidence.html)
 - [Documentation changelog](docs/changelog.html)

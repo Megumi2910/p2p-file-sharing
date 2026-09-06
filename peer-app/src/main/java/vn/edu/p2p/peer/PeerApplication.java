@@ -6,6 +6,7 @@ import vn.edu.p2p.peer.ui.SwingIncomingFilePrompt;
 
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
 import javax.swing.UIManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,38 +18,84 @@ public final class PeerApplication {
     public static void main(String[] args) {
         Path configPath = Path.of(args.length >= 1 ? args[0] : "peer.properties");
 
-        SwingUtilities.invokeLater(() -> {
-            try {
-                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-                if (!Files.exists(configPath)) {
-                    throw new IllegalArgumentException("Config file not found: " + configPath.toAbsolutePath());
+        try {
+            if (!Files.exists(configPath)) {
+                throw new IllegalArgumentException("Config file not found: " + configPath.toAbsolutePath());
+            }
+            AppConfig config = AppConfig.load(configPath);
+            PeerRuntime runtime = new PeerRuntime(config);
+
+            SwingUtilities.invokeLater(() -> {
+                try {
+                    UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+                } catch (Exception ignored) {
                 }
 
-                AppConfig config = AppConfig.load(configPath);
-                PeerRuntime runtime = new PeerRuntime(config);
                 MainFrame frame = new MainFrame(runtime);
+                frame.setStarting(true);
+                frame.setVisible(true);
+
                 runtime.transferManager().setListener(frame);
                 runtime.transferManager().setIncomingFilePrompt(new SwingIncomingFilePrompt(frame));
-                runtime.start();
 
-                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                Thread shutdownHook = new Thread(() -> {
                     try {
                         runtime.close();
                     } catch (Exception ignored) {
                     }
-                }));
+                }, "peer-shutdown-hook");
+                Runtime.getRuntime().addShutdownHook(shutdownHook);
 
-                frame.setVisible(true);
-                frame.refreshPeers();
-            } catch (Exception ex) {
-                ex.printStackTrace();
-                JOptionPane.showMessageDialog(
-                        null,
-                        ex.getMessage(),
-                        "Peer startup failed",
-                        JOptionPane.ERROR_MESSAGE
-                );
-            }
-        });
+                frame.addWindowListener(new java.awt.event.WindowAdapter() {
+                    @Override
+                    public void windowClosing(java.awt.event.WindowEvent e) {
+                        new Thread(() -> {
+                            try {
+                                runtime.close();
+                            } catch (Exception ignored) {
+                            }
+                        }, "peer-window-close").start();
+                    }
+                });
+
+                new SwingWorker<String, Void>() {
+                    @Override
+                    protected String doInBackground() throws Exception {
+                        runtime.start();
+                        return runtime.trackerObservedHost();
+                    }
+
+                    @Override
+                    protected void done() {
+                        try {
+                            get();
+                            frame.setStarting(false);
+                            frame.refreshPeers();
+                        } catch (Exception ex) {
+                            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                            JOptionPane.showMessageDialog(
+                                    frame,
+                                    "Peer startup failed: " + cause.getMessage(),
+                                    "Startup Error",
+                                    JOptionPane.ERROR_MESSAGE
+                            );
+                            frame.dispose();
+                            try {
+                                runtime.close();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }.execute();
+            });
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            JOptionPane.showMessageDialog(
+                    null,
+                    ex.getMessage(),
+                    "Peer startup failed",
+                    JOptionPane.ERROR_MESSAGE
+            );
+        }
     }
 }

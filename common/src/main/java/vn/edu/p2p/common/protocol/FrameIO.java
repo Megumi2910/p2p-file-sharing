@@ -12,12 +12,27 @@ public final class FrameIO {
     private static final int MAGIC = 0x50325031; // ASCII-ish: P2P1
     private static final short VERSION = 1;
     private static final int MAX_HEADERS = 128;
-    private static final int MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
+    public static final int MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
 
     private FrameIO() {
     }
 
     public static void write(OutputStream output, Frame frame) throws IOException {
+        if (frame.headers().size() > MAX_HEADERS) {
+            throw new IllegalArgumentException("Header count exceeds maximum: " + frame.headers().size());
+        }
+        for (Map.Entry<String, String> entry : frame.headers().entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                throw new IllegalArgumentException("Header key or value cannot be null");
+            }
+            if (utflen(entry.getKey()) > 65535 || utflen(entry.getValue()) > 65535) {
+                throw new IllegalArgumentException("Header string length exceeds UTF-8 limit (65535 bytes)");
+            }
+        }
+        if (frame.payload().length > MAX_PAYLOAD_BYTES) {
+            throw new IllegalArgumentException("Payload length exceeds maximum: " + frame.payload().length);
+        }
+
         DataOutputStream out = output instanceof DataOutputStream dataOut
                 ? dataOut
                 : new DataOutputStream(output);
@@ -38,6 +53,14 @@ public final class FrameIO {
     }
 
     public static Frame read(InputStream input) throws IOException {
+        return read(input, MAX_PAYLOAD_BYTES);
+    }
+
+    public static Frame read(InputStream input, int maxPayloadBytes) throws IOException {
+        if (maxPayloadBytes < 0 || maxPayloadBytes > MAX_PAYLOAD_BYTES) {
+            throw new IllegalArgumentException("Invalid maxPayloadBytes: " + maxPayloadBytes);
+        }
+
         DataInputStream in = input instanceof DataInputStream dataIn
                 ? dataIn
                 : new DataInputStream(input);
@@ -66,16 +89,36 @@ public final class FrameIO {
 
         Map<String, String> headers = new LinkedHashMap<>();
         for (int i = 0; i < headerCount; i++) {
-            headers.put(in.readUTF(), in.readUTF());
+            String key = in.readUTF();
+            String value = in.readUTF();
+            if (headers.put(key, value) != null) {
+                throw new IOException("Duplicate frame header key: " + key);
+            }
         }
 
         int payloadLength = in.readInt();
-        if (payloadLength < 0 || payloadLength > MAX_PAYLOAD_BYTES) {
-            throw new IOException("Invalid payload length: " + payloadLength);
+        int effectiveMax = Math.min(maxPayloadBytes, MAX_PAYLOAD_BYTES);
+        if (payloadLength < 0 || payloadLength > effectiveMax) {
+            throw new IOException("Invalid payload length: " + payloadLength + " (allowed max: " + effectiveMax + ")");
         }
 
         byte[] payload = new byte[payloadLength];
         in.readFully(payload);
         return new Frame(type, headers, payload);
+    }
+
+    private static int utflen(String s) {
+        int len = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if ((c >= 0x0001) && (c <= 0x007F)) {
+                len++;
+            } else if (c > 0x07FF) {
+                len += 3;
+            } else {
+                len += 2;
+            }
+        }
+        return len;
     }
 }

@@ -6,5 +6,5 @@ import java.net.InetSocketAddress;
 
 @FunctionalInterface
 public interface IncomingFilePrompt {
-    boolean accept(FileMetadata metadata, InetSocketAddress sender);
+    boolean accept(FileMetadata metadata, InetSocketAddress sender, long timeoutMillis);
 }

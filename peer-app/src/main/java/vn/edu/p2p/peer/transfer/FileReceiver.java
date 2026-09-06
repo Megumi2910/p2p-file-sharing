@@ -4,6 +4,7 @@ import vn.edu.p2p.common.model.FileMetadata;
 import vn.edu.p2p.common.protocol.Frame;
 import vn.edu.p2p.common.protocol.FrameIO;
 import vn.edu.p2p.common.protocol.MessageType;
+import vn.edu.p2p.peer.config.AppConfig;
 import vn.edu.p2p.peer.util.FileNameUtil;
 import vn.edu.p2p.peer.util.HashUtil;
 
@@ -11,26 +12,26 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.StandardCopyOption;
+import java.util.Locale;
 import java.util.Map;
 
 public final class FileReceiver implements Runnable {
     private final Socket socket;
-    private final Path downloadDir;
-    private final boolean autoAccept;
+    private final AppConfig config;
     private final IncomingFilePrompt prompt;
     private final TransferListener listener;
+    private final TransferSession session;
 
-    public FileReceiver(Socket socket, Path downloadDir, boolean autoAccept,
-                        IncomingFilePrompt prompt, TransferListener listener) {
+    public FileReceiver(Socket socket, AppConfig config, IncomingFilePrompt prompt,
+                        TransferListener listener, TransferSession session) {
         this.socket = socket;
-        this.downloadDir = downloadDir;
-        this.autoAccept = autoAccept;
+        this.config = config;
         this.prompt = prompt;
         this.listener = listener;
+        this.session = session;
     }
 
     @Override
@@ -38,17 +39,28 @@ public final class FileReceiver implements Runnable {
         FileMetadata metadata = null;
         Path finalPath = null;
         Path partPath = null;
+        long receivedBytes = 0;
+        long nextChunkIndex = 0;
+        String lastAcceptedSha256 = null;
 
         try (socket) {
-            Frame offer = FrameIO.read(socket.getInputStream());
+            session.attach(socket);
+            if (session.isCancelled()) {
+                return;
+            }
+
+            socket.setSoTimeout(config.transferReadTimeoutMillis());
+            Frame offer = FrameIO.read(socket.getInputStream(), 0);
             if (offer.type() != MessageType.FILE_OFFER) {
                 throw new IOException("Expected FILE_OFFER, got " + offer.type());
             }
             metadata = FileMetadata.fromOffer(offer);
+            FileNameUtil.safeBaseName(metadata.fileName());
 
-            boolean accepted = autoAccept || prompt.accept(
+            boolean accepted = config.autoAccept() || prompt.accept(
                     metadata,
-                    (InetSocketAddress) socket.getRemoteSocketAddress()
+                    (InetSocketAddress) socket.getRemoteSocketAddress(),
+                    config.transferPromptTimeoutMillis()
             );
             if (!accepted) {
                 FrameIO.write(socket.getOutputStream(), new Frame(
@@ -59,100 +71,204 @@ public final class FileReceiver implements Runnable {
                 return;
             }
 
-            finalPath = FileNameUtil.uniqueDestination(downloadDir, metadata.fileName());
-            partPath = Path.of(finalPath + ".part");
-            Files.createDirectories(downloadDir);
+            if (session.isCancelled()) {
+                update(metadata, TransferStatus.CANCELLED, 0, 0, "Cancelled before staging");
+                return;
+            }
+
+            // Advisory usable space check
+            long usableSpace = config.downloadDir().toFile().getUsableSpace();
+            if (metadata.fileSize() > usableSpace) {
+                FrameIO.write(socket.getOutputStream(), new Frame(
+                        MessageType.FILE_REJECT,
+                        Map.of("transferId", metadata.transferId(), "reason", "Insufficient storage space")
+                ));
+                update(metadata, TransferStatus.REJECTED, 0, 0, "Rejected: Insufficient storage space");
+                return;
+            }
+
+            // Create uniquely owned partial file ONLY after acceptance
+            partPath = FileNameUtil.createPartial(config.downloadDir());
 
             FrameIO.write(socket.getOutputStream(), new Frame(
                     MessageType.FILE_ACCEPT,
                     Map.of("transferId", metadata.transferId())
             ));
 
-            long receivedBytes = 0;
             long startedAt = System.nanoTime();
 
             try (RandomAccessFile out = new RandomAccessFile(partPath.toFile(), "rw")) {
-                out.setLength(metadata.fileSize());
+                // Grow sequentially through verified chunk writes; do not preallocate arbitrary length
 
                 while (true) {
-                    Frame frame = FrameIO.read(socket.getInputStream());
+                    if (session.isCancelled() || Thread.currentThread().isInterrupted()) {
+                        update(metadata, TransferStatus.CANCELLED, receivedBytes, 0, "Transfer cancelled");
+                        return;
+                    }
+
+                    socket.setSoTimeout(config.transferReadTimeoutMillis());
+                    Frame frame = FrameIO.read(socket.getInputStream(), metadata.chunkSize());
                     if (frame.type() == MessageType.TRANSFER_COMPLETE) {
+                        if (frame.payload().length != 0) {
+                            throw new IOException("TRANSFER_COMPLETE frame must have empty payload");
+                        }
+                        if (!metadata.transferId().equalsIgnoreCase(frame.requireHeader("transferId"))) {
+                            throw new IOException("Mismatched transferId in TRANSFER_COMPLETE");
+                        }
+                        if (nextChunkIndex != metadata.totalChunks()) {
+                            throw new IOException("Early completion: received " + nextChunkIndex + " chunks of " + metadata.totalChunks());
+                        }
+                        if (receivedBytes != metadata.fileSize()) {
+                            throw new IOException("Early completion: received " + receivedBytes + " bytes of " + metadata.fileSize());
+                        }
                         break;
                     }
                     if (frame.type() != MessageType.CHUNK_DATA) {
                         throw new IOException("Expected CHUNK_DATA, got " + frame.type());
                     }
 
-                    long chunkIndex = Long.parseLong(frame.requireHeader("chunkIndex"));
-                    long offset = Long.parseLong(frame.requireHeader("offset"));
-                    String expectedChunkHash = frame.requireHeader("chunkSha256");
-                    byte[] data = frame.payload();
-                    String actualChunkHash = HashUtil.sha256(data);
+                    if (!metadata.transferId().equalsIgnoreCase(frame.requireHeader("transferId"))) {
+                        throw new IOException("Mismatched transferId in CHUNK_DATA: " + frame.requireHeader("transferId"));
+                    }
 
-                    if (!actualChunkHash.equalsIgnoreCase(expectedChunkHash)) {
+                    long chunkIndex = Long.parseLong(frame.requireHeader("chunkIndex"));
+                    if (chunkIndex < 0 || chunkIndex >= metadata.totalChunks()) {
+                        throw new IOException("chunkIndex outside bounds: " + chunkIndex);
+                    }
+
+                    long offset = Long.parseLong(frame.requireHeader("offset"));
+                    long expectedOffset = chunkIndex * (long) metadata.chunkSize();
+                    if (offset != expectedOffset) {
+                        throw new IOException("Mismatched chunk offset: declared " + offset + ", expected " + expectedOffset);
+                    }
+
+                    int expectedLength = (int) Math.min(metadata.chunkSize(), metadata.fileSize() - expectedOffset);
+                    byte[] data = frame.payload();
+                    if (data.length != expectedLength) {
+                        throw new IOException("Mismatched chunk payload length: got " + data.length + ", expected " + expectedLength);
+                    }
+
+                    String expectedChunkHash = frame.requireHeader("chunkSha256").toLowerCase(Locale.ROOT);
+                    String actualChunkHash = HashUtil.sha256(data).toLowerCase(Locale.ROOT);
+
+                    // Check for repeat of immediately accepted chunk
+                    if (nextChunkIndex > 0 && chunkIndex == nextChunkIndex - 1) {
+                        if (actualChunkHash.equals(expectedChunkHash) && actualChunkHash.equals(lastAcceptedSha256)) {
+                            // Re-ACK without rewriting or incrementing progress
+                            FrameIO.write(socket.getOutputStream(), new Frame(
+                                    MessageType.CHUNK_ACK,
+                                    Map.of(
+                                            "transferId", metadata.transferId(),
+                                            "chunkIndex", Long.toString(chunkIndex),
+                                            "status", "OK"
+                                    )
+                            ));
+                            continue;
+                        } else {
+                            throw new IOException("Conflicting payload on repeated chunk " + chunkIndex);
+                        }
+                    }
+
+                    // Check for next expected chunk
+                    if (chunkIndex == nextChunkIndex) {
+                        if (!actualChunkHash.equals(expectedChunkHash)) {
+                            FrameIO.write(socket.getOutputStream(), new Frame(
+                                    MessageType.CHUNK_ACK,
+                                    Map.of(
+                                            "transferId", metadata.transferId(),
+                                            "chunkIndex", Long.toString(chunkIndex),
+                                            "status", "RETRY"
+                                    )
+                            ));
+                            continue;
+                        }
+
+                        // Valid new chunk
+                        out.seek(expectedOffset);
+                        out.write(data);
+                        receivedBytes += data.length;
+                        nextChunkIndex++;
+                        lastAcceptedSha256 = actualChunkHash;
+
                         FrameIO.write(socket.getOutputStream(), new Frame(
                                 MessageType.CHUNK_ACK,
                                 Map.of(
                                         "transferId", metadata.transferId(),
                                         "chunkIndex", Long.toString(chunkIndex),
-                                        "status", "RETRY"
+                                        "status", "OK"
                                 )
                         ));
-                        continue;
+
+                        double seconds = Math.max(0.001, (System.nanoTime() - startedAt) / 1_000_000_000.0);
+                        update(metadata, TransferStatus.TRANSFERRING, receivedBytes,
+                                receivedBytes / seconds,
+                                "Received chunk " + (chunkIndex + 1) + "/" + metadata.totalChunks());
+                    } else {
+                        throw new IOException("Out-of-order chunk: got " + chunkIndex + ", expected " + nextChunkIndex);
                     }
-
-                    if (offset < 0 || offset + data.length > metadata.fileSize()) {
-                        throw new IOException("Chunk writes outside declared file size");
-                    }
-
-                    out.seek(offset);
-                    out.write(data);
-                    receivedBytes += data.length;
-
-                    FrameIO.write(socket.getOutputStream(), new Frame(
-                            MessageType.CHUNK_ACK,
-                            Map.of(
-                                    "transferId", metadata.transferId(),
-                                    "chunkIndex", Long.toString(chunkIndex),
-                                    "status", "OK"
-                            )
-                    ));
-
-                    double seconds = Math.max(0.001, (System.nanoTime() - startedAt) / 1_000_000_000.0);
-                    update(metadata, TransferStatus.TRANSFERRING, receivedBytes,
-                            receivedBytes / seconds,
-                            "Received chunk " + (chunkIndex + 1) + "/" + metadata.totalChunks());
                 }
+            } // Writer closed before whole-file verification and publication
+
+            if (session.isCancelled()) {
+                update(metadata, TransferStatus.CANCELLED, receivedBytes, 0, "Transfer cancelled before publication");
+                return;
             }
 
-            update(metadata, TransferStatus.VERIFYING, metadata.fileSize(), 0, "Checking SHA-256...");
+            update(metadata, TransferStatus.VERIFYING, receivedBytes, 0, "Checking SHA-256...");
             String actualFileHash = HashUtil.sha256(partPath);
             boolean verified = actualFileHash.equalsIgnoreCase(metadata.fileSha256());
 
             if (verified) {
-                try {
-                    Files.move(partPath, finalPath, StandardCopyOption.ATOMIC_MOVE);
-                } catch (AtomicMoveNotSupportedException ex) {
-                    Files.move(partPath, finalPath);
+                final Path currentPart = partPath;
+                final FileMetadata currentMeta = metadata;
+                finalPath = session.publishIfActive(() ->
+                        FileNameUtil.publishVerified(currentPart, config.downloadDir(), currentMeta.fileName())
+                );
+                if (finalPath == null) {
+                    update(metadata, TransferStatus.CANCELLED, receivedBytes, 0, "Transfer cancelled before publication");
+                    return;
                 }
-                FrameIO.write(socket.getOutputStream(), new Frame(
-                        MessageType.VERIFY_RESULT,
-                        Map.of("transferId", metadata.transferId(), "status", "OK")
-                ));
-                update(metadata, TransferStatus.COMPLETED, metadata.fileSize(), 0,
+
+                // Remove temporary partial entry
+                try {
+                    Files.deleteIfExists(partPath);
+                } catch (IOException ex) {
+                    System.err.println("[PEER] Warning: failed to unlink temporary partial " + partPath + ": " + ex.getMessage());
+                }
+
+                update(metadata, TransferStatus.COMPLETED, receivedBytes, 0,
                         "Saved to " + finalPath.toAbsolutePath());
+
+                try {
+                    FrameIO.write(socket.getOutputStream(), new Frame(
+                            MessageType.VERIFY_RESULT,
+                            Map.of("transferId", metadata.transferId(), "status", "OK")
+                    ));
+                } catch (IOException ex) {
+                    System.err.println("[PEER] Warning: failed to deliver VERIFY_RESULT OK to sender: " + ex.getMessage());
+                }
             } else {
                 FrameIO.write(socket.getOutputStream(), new Frame(
                         MessageType.VERIFY_RESULT,
                         Map.of("transferId", metadata.transferId(), "status", "MISMATCH")
                 ));
-                update(metadata, TransferStatus.FAILED, metadata.fileSize(), 0, "Whole-file SHA-256 mismatch");
+                update(metadata, TransferStatus.FAILED, receivedBytes, 0, "Whole-file SHA-256 mismatch (partial: " + partPath.getFileName() + ")");
             }
         } catch (Exception ex) {
-            if (metadata != null) {
-                update(metadata, TransferStatus.FAILED, 0, 0, ex.getMessage());
+            if (session.isCancelled()) {
+                if (metadata != null) {
+                    update(metadata, TransferStatus.CANCELLED, receivedBytes, 0, "Transfer cancelled");
+                }
             } else {
-                System.err.println("[PEER] Incoming connection failed: " + ex.getMessage());
+                String cause = (ex instanceof SocketTimeoutException)
+                        ? "Socket read timeout: " + ex.getMessage()
+                        : (ex.getMessage() != null && !ex.getMessage().isBlank() ? ex.getMessage() : ex.getClass().getSimpleName());
+                if (metadata != null) {
+                    String msg = partPath != null ? (cause + " (partial: " + partPath.getFileName() + ")") : cause;
+                    update(metadata, TransferStatus.FAILED, receivedBytes, 0, msg);
+                } else {
+                    System.err.println("[PEER] Incoming connection failed: " + cause);
+                }
             }
         }
     }

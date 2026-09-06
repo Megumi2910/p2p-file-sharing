@@ -18,6 +18,9 @@ public final class HashUtil {
             byte[] buffer = new byte[1024 * 1024];
             int read;
             while ((read = in.read(buffer)) != -1) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new IOException("Hashing interrupted");
+                }
                 digest.update(buffer, 0, read);
             }
         }

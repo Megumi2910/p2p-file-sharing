@@ -12,8 +12,18 @@ tracker.port=5000
 # Received files are stored here, relative to the directory where the JAR is run.
 download.dir=downloads
 
-# 1 MiB chunks.
+# 1 MiB chunks (default: 1048576, maximum: 8388608).
 chunk.size.bytes=1048576
 
 # false = show Accept/Reject dialog for every incoming file.
 transfer.autoAccept=false
+
+# Timeouts in milliseconds
+tracker.read.timeout.ms=15000
+transfer.read.timeout.ms=15000
+transfer.prompt.timeout.ms=120000
+transfer.offer.response.timeout.ms=135000
+transfer.verify.timeout.ms=300000
+
+# Bounded transfer concurrency (1..64, default: 4)
+transfer.max.concurrent=4

@@ -13,8 +13,13 @@ public record TransferUpdate(
 ) {
     public int progressPercent() {
         if (totalBytes <= 0) {
+            return status == TransferStatus.COMPLETED ? 100 : 0;
+        }
+        if (bytesTransferred <= 0) {
             return 0;
         }
-        return (int) Math.min(100, (bytesTransferred * 100L) / totalBytes);
+        double ratio = (double) bytesTransferred / (double) totalBytes;
+        int percent = (int) Math.floor(ratio * 100.0);
+        return Math.clamp(percent, 0, 100);
     }
 }

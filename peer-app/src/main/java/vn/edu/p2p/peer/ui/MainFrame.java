@@ -25,12 +25,15 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
 
 public final class MainFrame extends JFrame implements TransferListener {
     private final PeerRuntime runtime;
     private final DefaultListModel<PeerInfo> peerModel = new DefaultListModel<>();
     private final JList<PeerInfo> peerList = new JList<>(peerModel);
     private final TransferTableModel transferModel = new TransferTableModel();
+    private final JButton refreshButton = new JButton("Refresh peers");
+    private final JButton sendButton = new JButton("Send file...");
 
     public MainFrame(PeerRuntime runtime) {
         super("P2P File Sharing - " + runtime.config().displayName());
@@ -56,11 +59,9 @@ public final class MainFrame extends JFrame implements TransferListener {
         peersPanel.setBorder(BorderFactory.createTitledBorder("Online peers"));
         peersPanel.add(new JScrollPane(peerList), BorderLayout.CENTER);
 
-        JButton refresh = new JButton("Refresh peers");
-        JButton send = new JButton("Send file...");
         JPanel peerButtons = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        peerButtons.add(refresh);
-        peerButtons.add(send);
+        peerButtons.add(refreshButton);
+        peerButtons.add(sendButton);
         peersPanel.add(peerButtons, BorderLayout.SOUTH);
 
         JTable transfers = new JTable(transferModel);
@@ -73,8 +74,13 @@ public final class MainFrame extends JFrame implements TransferListener {
         split.setResizeWeight(0.3);
         add(split, BorderLayout.CENTER);
 
-        refresh.addActionListener(e -> refreshPeers());
-        send.addActionListener(e -> chooseAndSend());
+        refreshButton.addActionListener(e -> refreshPeers());
+        sendButton.addActionListener(e -> chooseAndSend());
+    }
+
+    public void setStarting(boolean starting) {
+        refreshButton.setEnabled(!starting);
+        sendButton.setEnabled(!starting);
     }
 
     public void refreshPeers() {
@@ -87,13 +93,19 @@ public final class MainFrame extends JFrame implements TransferListener {
             @Override
             protected void done() {
                 try {
+                    List<PeerInfo> peers = get();
                     peerModel.clear();
-                    for (PeerInfo peer : get()) {
+                    for (PeerInfo peer : peers) {
                         peerModel.addElement(peer);
                     }
                 } catch (Exception ex) {
+                    peerModel.clear();
+                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                    String msg = cause.getMessage() != null && !cause.getMessage().isBlank()
+                            ? cause.getMessage()
+                            : cause.getClass().getSimpleName();
                     JOptionPane.showMessageDialog(MainFrame.this,
-                            "Could not refresh peers: " + ex.getMessage(),
+                            "Could not refresh peers: " + msg,
                             "Tracker error",
                             JOptionPane.ERROR_MESSAGE);
                 }
@@ -111,7 +123,16 @@ public final class MainFrame extends JFrame implements TransferListener {
         JFileChooser chooser = new JFileChooser();
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             Path file = chooser.getSelectedFile().toPath();
-            runtime.sendFile(target, file);
+            try {
+                runtime.sendFile(target, file);
+            } catch (RejectedExecutionException ex) {
+                JOptionPane.showMessageDialog(
+                        this,
+                        "Transfer rejected: maximum concurrent transfers reached (" + runtime.config().maxConcurrentTransfers() + ")",
+                        "Transfer Busy",
+                        JOptionPane.WARNING_MESSAGE
+                );
+            }
         }
     }
 

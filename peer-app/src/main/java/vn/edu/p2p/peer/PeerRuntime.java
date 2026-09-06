@@ -7,15 +7,21 @@ import vn.edu.p2p.peer.network.TrackerClient;
 import vn.edu.p2p.peer.transfer.TransferManager;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 public final class PeerRuntime implements AutoCloseable {
     private final AppConfig config;
     private final TrackerClient trackerClient;
     private final TransferManager transferManager;
     private final PeerServer peerServer;
+    private final Object stateLock = new Object();
     private String trackerObservedHost;
+    private volatile boolean started = false;
+    private volatile boolean closed = false;
 
     public PeerRuntime(AppConfig config) {
         this.config = config;
@@ -24,10 +30,47 @@ public final class PeerRuntime implements AutoCloseable {
         this.peerServer = new PeerServer(config.peerPort(), transferManager);
     }
 
-    public void start() throws IOException {
-        peerServer.start();
-        trackerObservedHost = trackerClient.connectAndRegister();
-        System.out.println("[PEER] Tracker sees this peer as " + trackerObservedHost + ":" + config.peerPort());
+    public void start() throws Exception {
+        synchronized (stateLock) {
+            if (closed) {
+                throw new IllegalStateException("PeerRuntime is closed");
+            }
+            if (started) {
+                return;
+            }
+        }
+
+        Path downloadDir = config.downloadDir();
+        Files.createDirectories(downloadDir);
+        if (!Files.isDirectory(downloadDir)) {
+            throw new IOException("Download path is not a directory: " + downloadDir);
+        }
+        if (!Files.isWritable(downloadDir)) {
+            throw new IOException("Download directory is not writable: " + downloadDir);
+        }
+
+        try {
+            peerServer.start();
+            if (closed) {
+                throw new IOException("PeerRuntime closed during startup");
+            }
+            String host = trackerClient.connectAndRegister();
+            synchronized (stateLock) {
+                if (closed) {
+                    throw new IOException("PeerRuntime closed during startup");
+                }
+                trackerObservedHost = host;
+                started = true;
+            }
+            System.out.println("[PEER] Tracker sees this peer as " + host + ":" + config.peerPort());
+        } catch (Exception ex) {
+            try {
+                close();
+            } catch (Exception rollbackEx) {
+                ex.addSuppressed(rollbackEx);
+            }
+            throw ex;
+        }
     }
 
     public List<PeerInfo> listPeers() throws IOException {
@@ -52,8 +95,49 @@ public final class PeerRuntime implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        trackerClient.close();
-        peerServer.close();
-        transferManager.close();
+        synchronized (stateLock) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+        }
+
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        List<Throwable> failures = new ArrayList<>();
+
+        // Phase 1: close admission and active sockets immediately
+        try {
+            peerServer.shutdown();
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+        try {
+            trackerClient.close();
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+        try {
+            transferManager.shutdown();
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+
+        // Phase 2: await termination sharing the single monotonic deadline
+        try {
+            peerServer.awaitTermination(deadlineNanos);
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+        try {
+            transferManager.awaitTermination(deadlineNanos);
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+
+        if (!failures.isEmpty()) {
+            Exception composite = new Exception("Failures during PeerRuntime close");
+            failures.forEach(composite::addSuppressed);
+            throw composite;
+        }
     }
 }

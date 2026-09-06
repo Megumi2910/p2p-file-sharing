@@ -11,20 +11,23 @@ import java.util.concurrent.ConcurrentMap;
 public final class PeerRegistry {
     private final ConcurrentMap<String, PeerInfo> peers = new ConcurrentHashMap<>();
 
-    public void register(PeerInfo peer) {
-        peers.put(peer.peerId(), peer);
+    public boolean register(PeerInfo peer) {
+        if (peer == null) {
+            return false;
+        }
+        return peers.putIfAbsent(peer.peerId(), peer) == null;
     }
 
-    public void unregister(String peerId) {
-        if (peerId != null) {
-            peers.remove(peerId);
+    public void unregister(PeerInfo peer) {
+        if (peer != null) {
+            peers.remove(peer.peerId(), peer);
         }
     }
 
     public List<PeerInfo> listExcept(String peerId) {
         List<PeerInfo> result = new ArrayList<>();
         for (PeerInfo peer : peers.values()) {
-            if (!peer.peerId().equals(peerId)) {
+            if (peerId == null || !peer.peerId().equals(peerId)) {
                 result.add(peer);
             }
         }

@@ -90,12 +90,34 @@ public final class FileSender implements Runnable {
                     throw new IOException("Expected FILE_ACCEPT, got " + decision.type());
                 }
 
+                // Check for resume negotiation
+                boolean resumed = "true".equalsIgnoreCase(decision.headers().get("resumed"));
+                long startChunkIndex = 0;
+                if (resumed) {
+                    String resumeIdxStr = decision.headers().get("resumeChunkIndex");
+                    if (resumeIdxStr != null) {
+                        startChunkIndex = Long.parseLong(resumeIdxStr);
+                        if (startChunkIndex < 0 || startChunkIndex > totalChunks) {
+                            throw new IOException("Invalid resumeChunkIndex from receiver: " + startChunkIndex);
+                        }
+                    }
+                }
+
+                transferred = (startChunkIndex == totalChunks)
+                        ? fileSize
+                        : startChunkIndex * (long) config.chunkSizeBytes();
+
+                if (resumed && startChunkIndex > 0) {
+                    update(transferId, fileName, TransferStatus.TRANSFERRING, transferred, fileSize, 0,
+                            "Resuming from chunk " + (startChunkIndex + 1) + "/" + totalChunks);
+                }
+
                 // Restore active read timeout for chunk transfers
                 socket.setSoTimeout(config.transferReadTimeoutMillis());
                 long startedAt = System.nanoTime();
 
                 try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "r")) {
-                    for (long chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    for (long chunkIndex = startChunkIndex; chunkIndex < totalChunks; chunkIndex++) {
                         if (session.isCancelled() || Thread.currentThread().isInterrupted()) {
                             update(transferId, fileName, TransferStatus.CANCELLED, transferred, fileSize, 0, "Transfer cancelled");
                             return;

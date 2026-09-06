@@ -13,8 +13,8 @@ import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -39,6 +39,8 @@ public final class FileReceiver implements Runnable {
         FileMetadata metadata = null;
         Path finalPath = null;
         Path partPath = null;
+        Path metaPath = null;
+        TransferMeta transferMeta = null;
         long receivedBytes = 0;
         long nextChunkIndex = 0;
         String lastAcceptedSha256 = null;
@@ -87,18 +89,45 @@ public final class FileReceiver implements Runnable {
                 return;
             }
 
-            // Create uniquely owned partial file ONLY after acceptance
-            partPath = FileNameUtil.createPartial(config.downloadDir());
+            // Check for existing resumable staging
+            TransferStorage.StagedTransfer existingStaging = TransferStorage.findResumableStaging(config.downloadDir(), metadata);
+            boolean isResume = false;
+            if (existingStaging != null && existingStaging.meta().contiguousReceivedPrefix() > 0) {
+                partPath = existingStaging.partPath();
+                metaPath = existingStaging.metaPath();
+                transferMeta = existingStaging.meta();
+                nextChunkIndex = transferMeta.contiguousReceivedPrefix();
+                receivedBytes = (nextChunkIndex == metadata.totalChunks())
+                        ? metadata.fileSize()
+                        : nextChunkIndex * (long) metadata.chunkSize();
+                isResume = true;
 
-            FrameIO.write(socket.getOutputStream(), new Frame(
-                    MessageType.FILE_ACCEPT,
-                    Map.of("transferId", metadata.transferId())
-            ));
+                Map<String, String> acceptHeaders = new LinkedHashMap<>();
+                acceptHeaders.put("transferId", metadata.transferId());
+                acceptHeaders.put("resumed", "true");
+                acceptHeaders.put("resumeChunkIndex", Long.toString(nextChunkIndex));
+                FrameIO.write(socket.getOutputStream(), new Frame(MessageType.FILE_ACCEPT, acceptHeaders));
+
+                update(metadata, TransferStatus.TRANSFERRING, receivedBytes, 0,
+                        "Resuming from chunk " + (nextChunkIndex + 1) + "/" + metadata.totalChunks());
+            } else {
+                TransferStorage.StagedTransfer newStaging = TransferStorage.createStaging(config.downloadDir(), metadata);
+                partPath = newStaging.partPath();
+                metaPath = newStaging.metaPath();
+                transferMeta = newStaging.meta();
+                nextChunkIndex = 0;
+                receivedBytes = 0;
+
+                FrameIO.write(socket.getOutputStream(), new Frame(
+                        MessageType.FILE_ACCEPT,
+                        Map.of("transferId", metadata.transferId(), "resumed", "false")
+                ));
+            }
 
             long startedAt = System.nanoTime();
 
             try (RandomAccessFile out = new RandomAccessFile(partPath.toFile(), "rw")) {
-                // Grow sequentially through verified chunk writes; do not preallocate arbitrary length
+                // Sequential write growth through verified chunk writes; no arbitrary length preallocation
 
                 while (true) {
                     if (session.isCancelled() || Thread.currentThread().isInterrupted()) {
@@ -153,7 +182,7 @@ public final class FileReceiver implements Runnable {
 
                     // Check for repeat of immediately accepted chunk
                     if (nextChunkIndex > 0 && chunkIndex == nextChunkIndex - 1) {
-                        if (actualChunkHash.equals(expectedChunkHash) && actualChunkHash.equals(lastAcceptedSha256)) {
+                        if (actualChunkHash.equals(expectedChunkHash) && (lastAcceptedSha256 == null || actualChunkHash.equals(lastAcceptedSha256))) {
                             // Re-ACK without rewriting or incrementing progress
                             FrameIO.write(socket.getOutputStream(), new Frame(
                                     MessageType.CHUNK_ACK,
@@ -183,9 +212,12 @@ public final class FileReceiver implements Runnable {
                             continue;
                         }
 
-                        // Valid new chunk
+                        // Valid new chunk: write, update bitmap, and flush metadata
                         out.seek(expectedOffset);
                         out.write(data);
+                        transferMeta.markChunkReceived(chunkIndex);
+                        transferMeta.save(metaPath);
+
                         receivedBytes += data.length;
                         nextChunkIndex++;
                         lastAcceptedSha256 = actualChunkHash;
@@ -229,12 +261,8 @@ public final class FileReceiver implements Runnable {
                     return;
                 }
 
-                // Remove temporary partial entry
-                try {
-                    Files.deleteIfExists(partPath);
-                } catch (IOException ex) {
-                    System.err.println("[PEER] Warning: failed to unlink temporary partial " + partPath + ": " + ex.getMessage());
-                }
+                // Remove both temporary .part and .part.meta upon successful publication
+                TransferStorage.cleanupStaging(partPath, metaPath);
 
                 update(metadata, TransferStatus.COMPLETED, receivedBytes, 0,
                         "Saved to " + finalPath.toAbsolutePath());

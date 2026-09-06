@@ -41,6 +41,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final DefaultListModel<PeerInfo> peerModel = new DefaultListModel<>();
     private final JList<PeerInfo> peerList = new JList<>(peerModel);
     private final TransferTableModel transferModel = new TransferTableModel();
+    private final JTable transfersTable = new JTable(transferModel);
     private final SearchResultTableModel searchModel = new SearchResultTableModel();
     private final ChunkVisualizerPanel visualizer = new ChunkVisualizerPanel();
     private final JTable searchTable = new JTable(searchModel);
@@ -84,19 +85,21 @@ public final class MainFrame extends JFrame implements TransferListener {
         peersPanel.add(peerButtons, BorderLayout.SOUTH);
 
         // Tab 1: Transfers with Chunk Visualizer
-        JTable transfers = new JTable(transferModel);
-        transfers.setFillsViewportHeight(true);
-        transfers.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        transfers.getSelectionModel().addListSelectionListener(e -> {
+        transfersTable.setFillsViewportHeight(true);
+        transfersTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        transfersTable.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
-                int row = transfers.getSelectedRow();
-                TransferUpdate u = transferModel.getUpdateAt(row);
-                visualizer.updateFrom(u);
+                int viewRow = transfersTable.getSelectedRow();
+                if (viewRow >= 0) {
+                    int modelRow = transfersTable.convertRowIndexToModel(viewRow);
+                    TransferUpdate u = transferModel.getUpdateAt(modelRow);
+                    visualizer.updateFrom(u);
+                }
             }
         });
 
         JPanel transfersPanel = new JPanel(new BorderLayout(6, 6));
-        transfersPanel.add(new JScrollPane(transfers), BorderLayout.CENTER);
+        transfersPanel.add(new JScrollPane(transfersTable), BorderLayout.CENTER);
         transfersPanel.add(visualizer, BorderLayout.SOUTH);
         tabbedPane.addTab("Transfers", transfersPanel);
 
@@ -251,13 +254,31 @@ public final class MainFrame extends JFrame implements TransferListener {
     public void onUpdate(TransferUpdate update) {
         SwingUtilities.invokeLater(() -> {
             transferModel.update(update);
-            visualizer.updateFrom(update);
+            int selectedViewRow = transfersTable.getSelectedRow();
+            if (selectedViewRow < 0) {
+                visualizer.updateFrom(update);
+            } else {
+                int selectedModelRow = transfersTable.convertRowIndexToModel(selectedViewRow);
+                TransferUpdate selectedUpdate = transferModel.getUpdateAt(selectedModelRow);
+                if (selectedUpdate != null && update.transferId().equals(selectedUpdate.transferId())) {
+                    visualizer.updateFrom(update);
+                }
+            }
+
             String ts = LocalTime.now().format(TIME_FORMATTER);
             logArea.append("[%s] [%s] %s (%s) %d%% %s%s\n".formatted(
                     ts, update.direction(), update.fileName(), update.formatSources(),
                     update.progressPercent(), update.status(),
                     (update.message() != null && !update.message().isBlank() ? " - " + update.message() : "")
             ));
+
+            if (logArea.getLineCount() > 500) {
+                try {
+                    int endOffset = logArea.getLineEndOffset(logArea.getLineCount() - 400);
+                    logArea.replaceRange("", 0, endOffset);
+                } catch (Exception ignored) {
+                }
+            }
         });
     }
 }

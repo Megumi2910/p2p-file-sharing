@@ -148,20 +148,34 @@ class ClassroomDemoScenarioIT {
         CountDownLatch downloadFinished = new CountDownLatch(1);
         AtomicReference<TransferStatus> charlieStatus = new AtomicReference<>();
         AtomicInteger maxSourcesSeen = new AtomicInteger(0);
-        AtomicBoolean failoverTriggered = new AtomicBoolean(false);
+        AtomicInteger aliceChunksServed = new AtomicInteger(0);
+        AtomicInteger bobChunksServed = new AtomicInteger(0);
+        AtomicBoolean aliceDropped = new AtomicBoolean(false);
+
+        runtimeAlice.transferManager().setListener(u -> {
+            if (u.direction() == TransferDirection.SEND && u.status() == TransferStatus.TRANSFERRING) {
+                int count = aliceChunksServed.incrementAndGet();
+                if (count >= 2 && !aliceDropped.get()) {
+                    aliceDropped.set(true);
+                    new Thread(() -> {
+                        try {
+                            runtimeAlice.close();
+                        } catch (Exception ignored) {
+                        }
+                    }).start();
+                }
+            }
+        });
+
+        runtimeBob.transferManager().setListener(u -> {
+            if (u.direction() == TransferDirection.SEND && u.status() == TransferStatus.TRANSFERRING) {
+                bobChunksServed.incrementAndGet();
+            }
+        });
 
         runtimeCharlie.transferManager().setListener(u -> {
             if (u.direction() == TransferDirection.RECEIVE) {
-                if (u.activeSourceCount() > maxSourcesSeen.get()) {
-                    maxSourcesSeen.set(u.activeSourceCount());
-                }
-                // Trigger mid-stream failure on Alice after some chunks are transferred
-                if (u.status() == TransferStatus.TRANSFERRING && u.bytesTransferred() >= 3000 && !failoverTriggered.get()) {
-                    failoverTriggered.set(true);
-                    try {
-                        runtimeAlice.close(); // Abruptly drop Alice!
-                    } catch (Exception ignored) {}
-                }
+                maxSourcesSeen.accumulateAndGet(u.activeSourceCount(), Math::max);
                 if (u.status() == TransferStatus.COMPLETED || u.status() == TransferStatus.FAILED) {
                     charlieStatus.set(u.status());
                     downloadFinished.countDown();
@@ -174,8 +188,10 @@ class ClassroomDemoScenarioIT {
         // Step 5: Wait for Charlie to complete download despite Alice dropping
         assertTrue(downloadFinished.await(12, TimeUnit.SECONDS), "Charlie download timed out");
         assertEquals(TransferStatus.COMPLETED, charlieStatus.get(), "Charlie should complete download via Bob");
+        assertTrue(aliceChunksServed.get() > 0, "Alice must have served chunks before failover");
+        assertTrue(bobChunksServed.get() > 0, "Bob must have served chunks after failover");
+        assertEquals(12, aliceChunksServed.get() + bobChunksServed.get(), "Combined chunks served must equal 12");
         assertTrue(maxSourcesSeen.get() >= 2, "Charlie should have observed parallel sources");
-
         // Step 6: Verify file on disk
         Path published = charlieDownloads.resolve("demo_presentation.pdf");
         assertTrue(Files.exists(published));
@@ -184,10 +200,17 @@ class ClassroomDemoScenarioIT {
         assertArrayEquals(presentationBytes, Files.readAllBytes(published));
 
         // Step 7: Verify tracker catalogue has pruned Alice
-        Thread.sleep(100);
-        List<SearchResult> postFailoverSearch = runtimeCharlie.searchFiles("demo");
+        long deadline = System.currentTimeMillis() + 5000;
+        List<SearchResult> postFailoverSearch = List.of();
+        while (System.currentTimeMillis() < deadline) {
+            postFailoverSearch = runtimeCharlie.searchFiles("demo");
+            if (!postFailoverSearch.isEmpty() && postFailoverSearch.get(0).providers().size() == 1) {
+                break;
+            }
+            Thread.sleep(50);
+        }
         assertEquals(1, postFailoverSearch.size());
         assertEquals(1, postFailoverSearch.get(0).providers().size(), "Only Bob should remain after Alice dropped");
         assertEquals("Bob", postFailoverSearch.get(0).providers().get(0).displayName());
-    }
+}
 }

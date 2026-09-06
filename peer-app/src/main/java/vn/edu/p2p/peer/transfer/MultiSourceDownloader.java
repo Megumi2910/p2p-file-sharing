@@ -100,17 +100,17 @@ public final class MultiSourceDownloader implements Runnable {
 
             if (initialReceived > 0) {
                 update(transferId, fileName, providerNames, TransferStatus.TRANSFERRING, initialReceived, fileSize, 0,
-                        providers.size(), activeTransferMeta,
+                        0, activeTransferMeta,
                         "Resumed: already have " + transferMeta.countReceivedChunks() + "/" + targetFile.totalChunks() + " chunks");
             } else {
                 update(transferId, fileName, providerNames, TransferStatus.TRANSFERRING, 0, fileSize, 0,
-                        providers.size(), activeTransferMeta,
+                        0, activeTransferMeta,
                         "Starting download from " + providers.size() + " peer(s)...");
             }
 
             // If empty file
             if (fileSize == 0) {
-                verifyAndPublish(transferId, fileName, providerNames, partPath, metaPath);
+                verifyAndPublish(transferId, fileName, providerNames, partPath, metaPath, activeTransferMeta);
                 return;
             }
 
@@ -129,6 +129,7 @@ public final class MultiSourceDownloader implements Runnable {
                     Thread worker = new Thread(() -> {
                         Socket socket = null;
                         Long currentAssignedChunk = null;
+                        boolean workerCounted = false;
                         try {
                             if (session.isCancelled()) {
                                 return;
@@ -138,6 +139,7 @@ public final class MultiSourceDownloader implements Runnable {
                             socket.connect(new InetSocketAddress(peer.host(), peer.port()), 7000);
                             socket.setTcpNoDelay(true);
                             activeWorkers.incrementAndGet();
+                            workerCounted = true;
 
                             while (!scheduler.isDone() && !session.isCancelled()) {
                                 Long chunkIndex = scheduler.pollNextChunk(peer.peerId());
@@ -213,7 +215,9 @@ public final class MultiSourceDownloader implements Runnable {
                                 scheduler.markFailure(-1, peer.peerId());
                             }
                         } finally {
-                            activeWorkers.decrementAndGet();
+                            if (workerCounted) {
+                                activeWorkers.decrementAndGet();
+                            }
                             if (socket != null) {
                                 session.detach(socket);
                                 if (!socket.isClosed()) {
@@ -252,19 +256,19 @@ public final class MultiSourceDownloader implements Runnable {
                 throw new IOException("Multi-source download could not complete all chunks (providers exhausted)");
             }
 
-            verifyAndPublish(transferId, fileName, providerNames, partPath, metaPath);
+            verifyAndPublish(transferId, fileName, providerNames, partPath, metaPath, activeTransferMeta);
 
         } catch (Exception ex) {
             if (session.isCancelled()) {
-                update(transferId, fileName, providerNames, TransferStatus.CANCELLED, confirmedBytes.get(), fileSize, 0, 0, null, "Download cancelled");
+                update(transferId, fileName, providerNames, TransferStatus.CANCELLED, confirmedBytes.get(), fileSize, 0, 0, transferMeta, "Download cancelled");
             } else {
-                update(transferId, fileName, providerNames, TransferStatus.FAILED, confirmedBytes.get(), fileSize, 0, 0, null, ex.getMessage());
+                update(transferId, fileName, providerNames, TransferStatus.FAILED, confirmedBytes.get(), fileSize, 0, 0, transferMeta, ex.getMessage());
             }
         }
     }
 
-    private void verifyAndPublish(String transferId, String fileName, String providerNames, Path partPath, Path metaPath) throws IOException {
-        update(transferId, fileName, providerNames, TransferStatus.VERIFYING, targetFile.fileSize(), targetFile.fileSize(), 0, providers.size(), null, "Checking whole-file SHA-256...");
+    private void verifyAndPublish(String transferId, String fileName, String providerNames, Path partPath, Path metaPath, TransferMeta meta) throws IOException {
+        update(transferId, fileName, providerNames, TransferStatus.VERIFYING, targetFile.fileSize(), targetFile.fileSize(), 0, 0, meta, "Checking whole-file SHA-256...");
         String actualSha = HashUtil.sha256(partPath);
         if (actualSha.equalsIgnoreCase(targetFile.fileId())) {
             final Path currentPart = partPath;
@@ -273,15 +277,15 @@ public final class MultiSourceDownloader implements Runnable {
                     FileNameUtil.publishVerified(currentPart, config.downloadDir(), currentName)
             );
             if (finalPath == null) {
-                update(transferId, fileName, providerNames, TransferStatus.CANCELLED, targetFile.fileSize(), targetFile.fileSize(), 0, 0, null, "Cancelled before publication");
+                update(transferId, fileName, providerNames, TransferStatus.CANCELLED, targetFile.fileSize(), targetFile.fileSize(), 0, 0, meta, "Cancelled before publication");
                 return;
             }
             TransferStorage.cleanupStaging(partPath, metaPath);
             update(transferId, fileName, providerNames, TransferStatus.COMPLETED, targetFile.fileSize(), targetFile.fileSize(), 0,
-                    providers.size(), null, "Saved to " + finalPath.toAbsolutePath());
+                    0, meta, "Saved to " + finalPath.toAbsolutePath());
         } else {
             update(transferId, fileName, providerNames, TransferStatus.FAILED, targetFile.fileSize(), targetFile.fileSize(), 0,
-                    0, null, "Whole-file SHA-256 mismatch (partial: " + partPath.getFileName() + ")");
+                    0, meta, "Whole-file SHA-256 mismatch (partial: " + partPath.getFileName() + ")");
         }
     }
 

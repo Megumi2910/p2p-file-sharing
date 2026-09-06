@@ -14,6 +14,15 @@ public record TransferUpdate(
         long totalChunks,
         String message
 ) {
+    public TransferUpdate {
+        receivedChunksMask = (receivedChunksMask != null) ? receivedChunksMask.clone() : null;
+    }
+
+    @Override
+    public long[] receivedChunksMask() {
+        return receivedChunksMask != null ? receivedChunksMask.clone() : null;
+    }
+
     public TransferUpdate(
             String transferId,
             String fileName,
@@ -54,7 +63,7 @@ public record TransferUpdate(
     }
 
     public String formatSpeed() {
-        if (bytesPerSecond <= 0) {
+        if (!Double.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
             return "--";
         }
         double kib = bytesPerSecond / 1024.0;
@@ -69,14 +78,18 @@ public record TransferUpdate(
         if (status == TransferStatus.COMPLETED) {
             return "Done";
         }
-        if (status != TransferStatus.TRANSFERRING || bytesPerSecond <= 1.0) {
+        if (status != TransferStatus.TRANSFERRING || !Double.isFinite(bytesPerSecond) || bytesPerSecond <= 1.0) {
             return "--";
         }
-        long remainingBytes = Math.max(0L, totalBytes - bytesTransferred);
-        long seconds = (long) Math.ceil(remainingBytes / bytesPerSecond);
-        if (seconds < 0 || seconds > 86400 * 7) {
+        if (totalBytes <= 0 || bytesTransferred < 0) {
             return "--";
         }
+        long remainingBytes = Math.max(0L, totalBytes - Math.min(bytesTransferred, totalBytes));
+        double remainingSecs = remainingBytes / bytesPerSecond;
+        if (!Double.isFinite(remainingSecs) || remainingSecs < 0 || remainingSecs > 86400.0 * 7) {
+            return "--";
+        }
+        long seconds = (long) Math.ceil(remainingSecs);
         long mins = seconds / 60;
         long secs = seconds % 60;
         if (mins >= 60) {

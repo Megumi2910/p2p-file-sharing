@@ -23,6 +23,8 @@ public final class FileSender implements Runnable {
     private static final int MAX_CHUNK_RETRIES = 3;
 
     private final PeerInfo target;
+    private final Socket connectedSocket;
+    private final String targetDisplayName;
     private final Path file;
     private final AppConfig config;
     private final TransferListener listener;
@@ -30,6 +32,19 @@ public final class FileSender implements Runnable {
 
     public FileSender(PeerInfo target, Path file, AppConfig config, TransferListener listener, TransferSession session) {
         this.target = target;
+        this.connectedSocket = null;
+        this.targetDisplayName = target.displayName();
+        this.file = file;
+        this.config = config;
+        this.listener = listener;
+        this.session = session;
+    }
+
+    public FileSender(Socket connectedSocket, String targetDisplayName, Path file, AppConfig config,
+                      TransferListener listener, TransferSession session) {
+        this.target = null;
+        this.connectedSocket = connectedSocket;
+        this.targetDisplayName = targetDisplayName;
         this.file = file;
         this.config = config;
         this.listener = listener;
@@ -67,14 +82,20 @@ public final class FileSender implements Runnable {
                     config.displayName()
             );
 
-            try (Socket socket = new Socket()) {
+            Socket socket = this.connectedSocket;
+            boolean newSocketCreated = false;
+            if (socket == null) {
+                socket = new Socket();
                 session.attach(socket);
                 socket.connect(new InetSocketAddress(target.host(), target.port()), 7_000);
-                socket.setTcpNoDelay(true);
+                newSocketCreated = true;
+            }
+            socket.setTcpNoDelay(true);
 
+            try {
                 FrameIO.write(socket.getOutputStream(), new Frame(MessageType.FILE_OFFER, metadata.toHeaders()));
                 update(transferId, fileName, TransferStatus.WAITING_FOR_ACCEPTANCE, 0, fileSize, 0,
-                        "Waiting for " + target.displayName() + "...");
+                        "Waiting for " + targetDisplayName + "...");
 
                 // Wait for decision using offer response timeout
                 socket.setSoTimeout(config.transferOfferResponseTimeoutMillis());
@@ -206,6 +227,13 @@ public final class FileSender implements Runnable {
                 } else {
                     throw new IOException("Unknown VERIFY_RESULT status: " + verifyStatus);
                 }
+            } finally {
+                if (newSocketCreated) {
+                    try {
+                        socket.close();
+                    } catch (IOException ignored) {
+                    }
+                }
             }
         } catch (Exception ex) {
             if (session.isCancelled()) {
@@ -222,7 +250,7 @@ public final class FileSender implements Runnable {
     private void update(String transferId, String fileName, TransferStatus status,
                         long bytes, long total, double speed, String message) {
         listener.onUpdate(new TransferUpdate(
-                transferId, fileName, target.displayName(), TransferDirection.SEND,
+                transferId, fileName, targetDisplayName, TransferDirection.SEND,
                 status, bytes, total, speed, message
         ));
     }

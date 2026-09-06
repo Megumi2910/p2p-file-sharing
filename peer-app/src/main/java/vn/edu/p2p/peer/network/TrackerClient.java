@@ -119,6 +119,83 @@ public final class TrackerClient implements AutoCloseable {
             }
         }
     }
+    public void publishSharedFiles(List<vn.edu.p2p.common.model.FileRecord> files) throws IOException {
+        synchronized (requestLock) {
+            Socket currentSocket = this.socket;
+            if (closed || currentSocket == null || currentSocket.isClosed()) {
+                throw new IOException("Not connected to tracker");
+            }
+            try {
+                currentSocket.setSoTimeout(config.trackerReadTimeoutMillis());
+                byte[] payload = vn.edu.p2p.common.model.CatalogueCodec.encodeFiles(files);
+                FrameIO.write(currentSocket.getOutputStream(), new Frame(
+                        MessageType.TRACKER_PUBLISH_FILES,
+                        Map.of("count", Integer.toString(files.size())),
+                        payload
+                ));
+                Frame response = FrameIO.read(currentSocket.getInputStream(), 0);
+                if (response.type() == MessageType.ERROR) {
+                    throw new IOException(response.requireHeader("message"));
+                }
+                if (response.type() != MessageType.TRACKER_PUBLISH_OK) {
+                    throw new IOException("Unexpected tracker response: " + response.type());
+                }
+            } catch (Exception ex) {
+                synchronized (lifecycleLock) {
+                    try {
+                        currentSocket.close();
+                    } catch (IOException ignored) {
+                    }
+                    this.socket = null;
+                }
+                if (ex instanceof IOException ioEx) {
+                    throw ioEx;
+                }
+                throw new IOException("Failed to publish shared files: " + ex.getMessage(), ex);
+            }
+        }
+    }
+
+    public List<vn.edu.p2p.common.model.SearchResult> searchFiles(String query) throws IOException {
+        synchronized (requestLock) {
+            Socket currentSocket = this.socket;
+            if (closed || currentSocket == null || currentSocket.isClosed()) {
+                throw new IOException("Not connected to tracker");
+            }
+            try {
+                currentSocket.setSoTimeout(config.trackerReadTimeoutMillis());
+                FrameIO.write(currentSocket.getOutputStream(), new Frame(
+                        MessageType.TRACKER_SEARCH,
+                        Map.of("query", query == null ? "" : query)
+                ));
+                Frame response = FrameIO.read(currentSocket.getInputStream(), TrackerProtocol.MAX_PEER_LIST_PAYLOAD_BYTES);
+                if (response.type() == MessageType.ERROR) {
+                    throw new IOException(response.requireHeader("message"));
+                }
+                if (response.type() != MessageType.TRACKER_SEARCH_RESULTS) {
+                    throw new IOException("Unexpected tracker response: " + response.type());
+                }
+                int count = Integer.parseInt(response.requireHeader("count"));
+                List<vn.edu.p2p.common.model.SearchResult> results = vn.edu.p2p.common.model.CatalogueCodec.decodeSearchResults(response.payload());
+                if (results.size() != count) {
+                    throw new IOException("Mismatched search results count: header=" + count + ", decoded=" + results.size());
+                }
+                return results;
+            } catch (Exception ex) {
+                synchronized (lifecycleLock) {
+                    try {
+                        currentSocket.close();
+                    } catch (IOException ignored) {
+                    }
+                    this.socket = null;
+                }
+                if (ex instanceof IOException ioEx) {
+                    throw ioEx;
+                }
+                throw new IOException("Failed to search files: " + ex.getMessage(), ex);
+            }
+        }
+    }
 
     @Override
     public void close() throws IOException {

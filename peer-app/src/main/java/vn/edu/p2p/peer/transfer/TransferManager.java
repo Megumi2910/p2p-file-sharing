@@ -125,6 +125,52 @@ public final class TransferManager implements AutoCloseable {
             }
         }
     }
+    public void requestDownload(PeerInfo provider, vn.edu.p2p.common.model.FileRecord targetFile) {
+        TransferSession session = new TransferSession();
+        synchronized (lifecycleLock) {
+            if (closed) {
+                throw new RejectedExecutionException("TransferManager is closed");
+            }
+            activeSessions.add(session);
+            try {
+                executor.submit(() -> {
+                    Socket socket = null;
+                    try {
+                        socket = new Socket();
+                        session.attach(socket);
+                        socket.connect(new java.net.InetSocketAddress(provider.host(), provider.port()), 7000);
+                        socket.setTcpNoDelay(true);
+
+                        vn.edu.p2p.common.protocol.FrameIO.write(socket.getOutputStream(), new vn.edu.p2p.common.protocol.Frame(
+                                vn.edu.p2p.common.protocol.MessageType.FILE_REQUEST,
+                                java.util.Map.of("fileId", targetFile.fileId(), "fileName", targetFile.fileName())
+                        ));
+
+                        new FileReceiver(socket, config, prompt, listener, session).run();
+                    } catch (Exception ex) {
+                        if (socket != null && !socket.isClosed()) {
+                            try {
+                                socket.close();
+                            } catch (IOException ignored) {
+                            }
+                        }
+                        listener.onUpdate(new TransferUpdate(
+                                java.util.UUID.randomUUID().toString(), targetFile.fileName(), provider.displayName(),
+                                TransferDirection.RECEIVE, TransferStatus.FAILED, 0, targetFile.fileSize(), 0,
+                                ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName()
+                        ));
+                    } finally {
+                        synchronized (lifecycleLock) {
+                            activeSessions.remove(session);
+                        }
+                    }
+                });
+            } catch (RejectedExecutionException ex) {
+                activeSessions.remove(session);
+                throw ex;
+            }
+        }
+    }
 
     public void shutdown() throws IOException {
         synchronized (lifecycleLock) {

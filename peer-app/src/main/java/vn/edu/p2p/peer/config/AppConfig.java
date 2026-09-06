@@ -15,6 +15,7 @@ public record AppConfig(
         String trackerHost,
         int trackerPort,
         Path downloadDir,
+        Path sharedDir,
         int chunkSizeBytes,
         boolean autoAccept,
         int trackerReadTimeoutMillis,
@@ -24,6 +25,32 @@ public record AppConfig(
         int transferVerifyTimeoutMillis,
         int maxConcurrentTransfers
 ) {
+    public AppConfig(
+            String peerId,
+            String displayName,
+            int peerPort,
+            String trackerHost,
+            int trackerPort,
+            Path downloadDir,
+            int chunkSizeBytes,
+            boolean autoAccept,
+            int trackerReadTimeoutMillis,
+            int transferReadTimeoutMillis,
+            int transferPromptTimeoutMillis,
+            int transferOfferResponseTimeoutMillis,
+            int transferVerifyTimeoutMillis,
+            int maxConcurrentTransfers
+    ) {
+        this(
+                peerId, displayName, peerPort, trackerHost, trackerPort,
+                downloadDir,
+                downloadDir != null ? downloadDir.resolveSibling("shared") : Path.of("shared"),
+                chunkSizeBytes, autoAccept,
+                trackerReadTimeoutMillis, transferReadTimeoutMillis, transferPromptTimeoutMillis,
+                transferOfferResponseTimeoutMillis, transferVerifyTimeoutMillis, maxConcurrentTransfers
+        );
+    }
+
     public AppConfig {
         if (peerId == null || peerId.isBlank()) {
             throw new IllegalArgumentException("peerId cannot be blank");
@@ -63,6 +90,9 @@ public record AppConfig(
 
         if (downloadDir == null) {
             throw new IllegalArgumentException("downloadDir cannot be null");
+        }
+        if (sharedDir == null) {
+            sharedDir = downloadDir.resolveSibling("shared");
         }
 
         if (chunkSizeBytes < 1 || chunkSizeBytes > TransferProtocol.MAX_CHUNK_BYTES) {
@@ -120,6 +150,7 @@ public record AppConfig(
         }
 
         Path downloadDir = Path.of(p.getProperty("download.dir", "downloads"));
+        Path sharedDir = Path.of(p.getProperty("shared.dir", "shared"));
 
         int chunkSizeBytes = Integer.parseInt(p.getProperty("chunk.size.bytes", Integer.toString(TransferProtocol.DEFAULT_CHUNK_BYTES)));
         if (chunkSizeBytes < 1 || chunkSizeBytes > TransferProtocol.MAX_CHUNK_BYTES) {
@@ -150,6 +181,7 @@ public record AppConfig(
                 trackerHost.trim(),
                 trackerPort,
                 downloadDir,
+                sharedDir,
                 chunkSizeBytes,
                 autoAccept,
                 trackerReadTimeout,

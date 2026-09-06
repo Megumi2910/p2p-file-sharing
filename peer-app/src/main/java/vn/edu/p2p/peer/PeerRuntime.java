@@ -19,6 +19,7 @@ public final class PeerRuntime implements AutoCloseable {
     private final TransferManager transferManager;
     private final PeerServer peerServer;
     private final Object stateLock = new Object();
+    private final List<vn.edu.p2p.common.model.FileRecord> sharedFiles = new java.util.concurrent.CopyOnWriteArrayList<>();
     private String trackerObservedHost;
     private volatile boolean started = false;
     private volatile boolean closed = false;
@@ -48,6 +49,8 @@ public final class PeerRuntime implements AutoCloseable {
         if (!Files.isWritable(downloadDir)) {
             throw new IOException("Download directory is not writable: " + downloadDir);
         }
+        Path sharedDir = config.sharedDir();
+        Files.createDirectories(sharedDir);
 
         try {
             peerServer.start();
@@ -62,6 +65,11 @@ public final class PeerRuntime implements AutoCloseable {
                 trackerObservedHost = host;
                 started = true;
             }
+            // Index and publish shared folder to tracker
+            List<vn.edu.p2p.common.model.FileRecord> indexed = vn.edu.p2p.peer.transfer.SharedFolderIndexer.index(config);
+            sharedFiles.clear();
+            sharedFiles.addAll(indexed);
+            trackerClient.publishSharedFiles(indexed);
             System.out.println("[PEER] Tracker sees this peer as " + host + ":" + config.peerPort());
         } catch (Exception ex) {
             try {
@@ -73,12 +81,33 @@ public final class PeerRuntime implements AutoCloseable {
         }
     }
 
+    public List<vn.edu.p2p.common.model.FileRecord> sharedFiles() {
+        return List.copyOf(sharedFiles);
+    }
+
+    public List<vn.edu.p2p.common.model.SearchResult> searchFiles(String query) throws IOException {
+        return trackerClient.searchFiles(query);
+    }
+
+    public void refreshSharedFiles() throws IOException {
+        List<vn.edu.p2p.common.model.FileRecord> indexed = vn.edu.p2p.peer.transfer.SharedFolderIndexer.index(config);
+        sharedFiles.clear();
+        sharedFiles.addAll(indexed);
+        trackerClient.publishSharedFiles(indexed);
+    }
     public List<PeerInfo> listPeers() throws IOException {
         return trackerClient.listPeers();
     }
 
     public void sendFile(PeerInfo target, Path file) {
         transferManager.sendFile(target, file);
+    }
+    public void downloadFile(vn.edu.p2p.common.model.SearchResult result) {
+        if (result == null || result.providers().isEmpty()) {
+            throw new IllegalArgumentException("No live providers available for file: " + (result != null ? result.file().fileName() : "null"));
+        }
+        PeerInfo provider = result.providers().get(0);
+        transferManager.requestDownload(provider, result.file());
     }
 
     public AppConfig config() {

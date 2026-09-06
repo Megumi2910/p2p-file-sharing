@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class TrackerServer implements AutoCloseable {
     private final int port;
     private final PeerRegistry registry = new PeerRegistry();
+    private final FileCatalogue catalogue = new FileCatalogue();
     private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
     private final Object lifecycleLock = new Object();
     private final ThreadPoolExecutor clients;
@@ -108,6 +109,10 @@ public final class TrackerServer implements AutoCloseable {
         return ss.getLocalPort();
     }
 
+    public FileCatalogue catalogue() {
+        return catalogue;
+    }
+
     private void handleClient(Socket socket) {
         PeerInfo ownedPeer = null;
         try (socket) {
@@ -115,7 +120,7 @@ public final class TrackerServer implements AutoCloseable {
             socket.setSoTimeout(15_000); // 15s timeout until registration
 
             while (true) {
-                Frame frame = FrameIO.read(socket.getInputStream(), 0);
+                Frame frame = FrameIO.read(socket.getInputStream(), TrackerProtocol.MAX_PEER_LIST_PAYLOAD_BYTES);
 
                 switch (frame.type()) {
                     case TRACKER_REGISTER -> {
@@ -157,6 +162,33 @@ public final class TrackerServer implements AutoCloseable {
                                 payload
                         ));
                     }
+                    case TRACKER_PUBLISH_FILES -> {
+                        if (ownedPeer == null) {
+                            sendError(socket, "Register first");
+                            continue;
+                        }
+                        var files = vn.edu.p2p.common.model.CatalogueCodec.decodeFiles(frame.payload());
+                        catalogue.publishFiles(ownedPeer.peerId(), files);
+                        FrameIO.write(socket.getOutputStream(), new Frame(
+                                MessageType.TRACKER_PUBLISH_OK,
+                                Map.of("count", Integer.toString(files.size()))
+                        ));
+                        System.out.println("[TRACKER] Published " + files.size() + " files from " + ownedPeer.peerId());
+                    }
+                    case TRACKER_SEARCH -> {
+                        if (ownedPeer == null) {
+                            sendError(socket, "Register first");
+                            continue;
+                        }
+                        String query = frame.headers().getOrDefault("query", "");
+                        var results = catalogue.search(query, registry);
+                        byte[] payload = vn.edu.p2p.common.model.CatalogueCodec.encodeSearchResults(results);
+                        FrameIO.write(socket.getOutputStream(), new Frame(
+                                MessageType.TRACKER_SEARCH_RESULTS,
+                                Map.of("count", Integer.toString(results.size())),
+                                payload
+                        ));
+                    }
                     case TRACKER_DISCONNECT -> {
                         return;
                     }
@@ -169,8 +201,8 @@ public final class TrackerServer implements AutoCloseable {
             System.err.println("[TRACKER] Client error: " + ex.getMessage());
         } finally {
             if (ownedPeer != null) {
+                catalogue.removePeer(ownedPeer.peerId());
                 registry.unregister(ownedPeer);
-                System.out.println("[TRACKER] Unregistered " + ownedPeer);
             }
         }
     }

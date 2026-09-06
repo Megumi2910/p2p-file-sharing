@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -53,8 +54,21 @@ public final class FileReceiver implements Runnable {
 
             socket.setSoTimeout(config.transferReadTimeoutMillis());
             Frame offer = FrameIO.read(socket.getInputStream(), 0);
+            if (offer.type() == MessageType.FILE_REQUEST) {
+                String requestedFileId = offer.requireHeader("fileId");
+                Path source = findSharedFile(requestedFileId);
+                if (source == null) {
+                    FrameIO.write(socket.getOutputStream(), new Frame(
+                            MessageType.FILE_REJECT,
+                            Map.of("reason", "Requested file not found in shared folder")
+                    ));
+                    return;
+                }
+                new FileSender(socket, "Downloader", source, config, listener, session).run();
+                return;
+            }
             if (offer.type() != MessageType.FILE_OFFER) {
-                throw new IOException("Expected FILE_OFFER, got " + offer.type());
+                throw new IOException("Expected FILE_OFFER or FILE_REQUEST, got " + offer.type());
             }
             metadata = FileMetadata.fromOffer(offer);
             FileNameUtil.safeBaseName(metadata.fileName());
@@ -306,5 +320,23 @@ public final class FileReceiver implements Runnable {
                 metadata.transferId(), metadata.fileName(), metadata.senderName(), TransferDirection.RECEIVE,
                 status, bytes, metadata.fileSize(), speed, message
         ));
+    }
+
+    private Path findSharedFile(String fileId) {
+        Path shared = config.sharedDir();
+        if (!Files.isDirectory(shared)) {
+            return null;
+        }
+        try (var stream = Files.newDirectoryStream(shared)) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p) && Files.isReadable(p)) {
+                    if (fileId.equalsIgnoreCase(HashUtil.sha256(p))) {
+                        return p;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 }

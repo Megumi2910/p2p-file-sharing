@@ -4,7 +4,7 @@ import vn.edu.p2p.peer.transfer.TransferUpdate;
 
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -13,28 +13,33 @@ public final class TransferTableModel extends AbstractTableModel {
             "Direction", "File", "Peer / Sources", "Progress", "Speed", "ETA", "Status"
     };
 
-    private final Map<String, TransferUpdate> byId = new LinkedHashMap<>();
+    private final List<TransferUpdate> rows = new ArrayList<>();
+    private final Map<String, Integer> rowIndices = new HashMap<>();
 
     public void update(TransferUpdate update) {
-        byId.put(update.transferId(), update);
-        fireTableDataChanged();
-    }
-
-    public List<TransferUpdate> rows() {
-        return new ArrayList<>(byId.values());
+        String id = update.transferId();
+        Integer index = rowIndices.get(id);
+        if (index != null) {
+            rows.set(index, update);
+            fireTableRowsUpdated(index, index);
+        } else {
+            int newIndex = rows.size();
+            rows.add(update);
+            rowIndices.put(id, newIndex);
+            fireTableRowsInserted(newIndex, newIndex);
+        }
     }
 
     public TransferUpdate getUpdateAt(int rowIndex) {
-        List<TransferUpdate> list = rows();
-        if (rowIndex >= 0 && rowIndex < list.size()) {
-            return list.get(rowIndex);
+        if (rowIndex >= 0 && rowIndex < rows.size()) {
+            return rows.get(rowIndex);
         }
         return null;
     }
 
     @Override
     public int getRowCount() {
-        return byId.size();
+        return rows.size();
     }
 
     @Override
@@ -49,11 +54,10 @@ public final class TransferTableModel extends AbstractTableModel {
 
     @Override
     public Object getValueAt(int rowIndex, int columnIndex) {
-        List<TransferUpdate> list = rows();
-        if (rowIndex < 0 || rowIndex >= list.size()) {
+        if (rowIndex < 0 || rowIndex >= rows.size()) {
             return null;
         }
-        TransferUpdate row = list.get(rowIndex);
+        TransferUpdate row = rows.get(rowIndex);
         return switch (columnIndex) {
             case 0 -> row.direction();
             case 1 -> row.fileName();

@@ -128,7 +128,10 @@ public record AppConfig(
         try (InputStream in = Files.newInputStream(path)) {
             p.load(in);
         }
+        return fromProperties(p);
+    }
 
+    static AppConfig fromProperties(Properties p) {
         String rawPeerId = p.getProperty("peer.id");
         validateNoIsoControls("peer.id", rawPeerId);
         String rawDisplayName = p.getProperty("peer.name");

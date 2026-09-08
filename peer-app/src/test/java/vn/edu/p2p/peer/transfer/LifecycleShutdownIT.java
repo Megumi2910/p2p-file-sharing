@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class LifecycleShutdownIT {
 
@@ -134,5 +135,144 @@ class LifecycleShutdownIT {
 
         server.close();
         manager.close();
+    }
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void testTryReserveRestartRefusedDuringActiveTransferAndSucceedsWhenIdle(@TempDir Path tempDir) throws Exception {
+        Path senderDir = tempDir.resolve("sender");
+        Path receiverDir = tempDir.resolve("receiver");
+        Files.createDirectories(senderDir);
+        Files.createDirectories(receiverDir);
+
+        AppConfig receiverConfig = new AppConfig(
+                "receiver", "Receiver", 6001, "127.0.0.1", 5000, receiverDir, 1024, true,
+                15000, 15000, 120000, 135000, 300000, 4
+        );
+        TransferManager receiverManager = new TransferManager(receiverConfig);
+        PeerServer receiverServer = new PeerServer(0, receiverManager);
+        receiverServer.start();
+        int receiverPort = receiverServer.localPort();
+
+        AppConfig senderConfig = new AppConfig(
+                "sender", "Sender", 6002, "127.0.0.1", 5000, senderDir, 1024, false,
+                15000, 15000, 120000, 135000, 300000, 4
+        );
+        TransferManager senderManager = new TransferManager(senderConfig);
+
+        Path testFile = senderDir.resolve("reserve_test.bin");
+        Files.write(testFile, new byte[64 * 1024]); // 64 chunks
+
+        CountDownLatch transferActiveLatch = new CountDownLatch(1);
+        CountDownLatch completedLatch = new CountDownLatch(1);
+        AtomicReference<Boolean> reservedWhileActive = new AtomicReference<>();
+
+        senderManager.setListener(update -> {
+            if (update.direction() == TransferDirection.SEND) {
+                if (update.status() == TransferStatus.TRANSFERRING && update.bytesTransferred() > 5000) {
+                    if (transferActiveLatch.getCount() > 0) {
+                        reservedWhileActive.set(senderManager.tryReserveRestart());
+                        transferActiveLatch.countDown();
+                    }
+                }
+                if (update.status() == TransferStatus.COMPLETED) {
+                    completedLatch.countDown();
+                }
+            }
+        });
+
+        PeerInfo target = new PeerInfo("receiver", "Receiver", "127.0.0.1", receiverPort);
+        senderManager.sendFile(target, testFile);
+
+        assertTrue(transferActiveLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(Boolean.FALSE, reservedWhileActive.get(), "tryReserveRestart must return false while transfers are active");
+
+        assertTrue(completedLatch.await(10, TimeUnit.SECONDS));
+
+        // Wait for session cleanup
+        while (senderManager.hasActiveSessions()) {
+            Thread.sleep(50);
+        }
+
+        // Once idle, reservation must succeed
+        assertTrue(senderManager.tryReserveRestart(), "tryReserveRestart must succeed when idle");
+        assertTrue(senderManager.isReserved());
+
+        // Once reserved, new submissions must be rejected
+        assertThrows(java.util.concurrent.RejectedExecutionException.class, () ->
+                senderManager.sendFile(target, testFile));
+
+        // Cancelling reservation restores acceptance
+        senderManager.cancelRestartReservation();
+        assertFalse(senderManager.isReserved());
+
+        // Re-reserving succeeds
+        assertTrue(senderManager.tryReserveRestart());
+
+        // Ordinary shutdown closes manager and clears reservation
+        senderManager.shutdown();
+        assertFalse(senderManager.tryReserveRestart(), "Cannot reserve after shutdown");
+
+        receiverServer.close();
+        receiverManager.close();
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void testTryReserveRestartRefusedDuringIncomingPromptDecision(@TempDir Path tempDir) throws Exception {
+        Path receiverDir = tempDir.resolve("receiver");
+        Files.createDirectories(receiverDir);
+
+        CountDownLatch promptEntered = new CountDownLatch(1);
+        CountDownLatch promptAllow = new CountDownLatch(1);
+
+        AppConfig receiverConfig = new AppConfig(
+                "receiver", "Receiver", 6001, "127.0.0.1", 5000, receiverDir, 1024, false,
+                15000, 15000, 120000, 135000, 300000, 4
+        );
+        TransferManager receiverManager = new TransferManager(receiverConfig);
+        receiverManager.setIncomingFilePrompt((meta, sender, timeout) -> {
+            promptEntered.countDown();
+            try {
+                promptAllow.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+            return false;
+        });
+
+        PeerServer receiverServer = new PeerServer(0, receiverManager);
+        receiverServer.start();
+        int receiverPort = receiverServer.localPort();
+
+        try (Socket clientSocket = new Socket("127.0.0.1", receiverPort)) {
+            String sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            vn.edu.p2p.common.model.FileMetadata meta = new vn.edu.p2p.common.model.FileMetadata(
+                    java.util.UUID.randomUUID().toString(), sha, "prompt_test.txt", 100, 1024, 1, sha, "Sender"
+            );
+            FrameIO.write(clientSocket.getOutputStream(), new Frame(
+                    MessageType.FILE_OFFER,
+                    meta.toHeaders()
+            ));
+
+            assertTrue(promptEntered.await(5, TimeUnit.SECONDS), "Incoming prompt should be invoked");
+
+            // While prompt decision is open, reservation must return false
+            assertFalse(receiverManager.tryReserveRestart(), "tryReserveRestart must return false during active prompt decision");
+
+            // Release prompt
+            promptAllow.countDown();
+        }
+
+        // Wait for session to finish
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (receiverManager.hasActiveSessions() && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+
+        // Once prompt finished and closed, reservation succeeds
+        assertTrue(receiverManager.tryReserveRestart(), "tryReserveRestart must succeed after prompt decision resolves");
+
+        receiverServer.close();
+        receiverManager.close();
     }
 }

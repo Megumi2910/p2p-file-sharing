@@ -25,6 +25,7 @@ public final class TransferManager implements AutoCloseable {
     private volatile TransferListener listener = TransferListener.noOp();
     private volatile IncomingFilePrompt prompt = (metadata, sender, timeout) -> false;
     private volatile boolean closed = false;
+    private volatile boolean reserved = false;
 
     public TransferManager(AppConfig config) {
         this.config = config;
@@ -57,8 +58,8 @@ public final class TransferManager implements AutoCloseable {
     public void sendFile(PeerInfo target, Path file) {
         TransferSession session = new TransferSession();
         synchronized (lifecycleLock) {
-            if (closed) {
-                throw new RejectedExecutionException("TransferManager is closed");
+            if (closed || reserved) {
+                throw new RejectedExecutionException(closed ? "TransferManager is closed" : "TransferManager is reserved for restart");
             }
             activeSessions.add(session);
             try {
@@ -93,7 +94,7 @@ public final class TransferManager implements AutoCloseable {
         }
 
         synchronized (lifecycleLock) {
-            if (closed) {
+            if (closed || reserved) {
                 session.cancel();
                 if (socket != null && !socket.isClosed()) {
                     try {
@@ -129,8 +130,8 @@ public final class TransferManager implements AutoCloseable {
     public void requestDownload(PeerInfo provider, vn.edu.p2p.common.model.FileRecord targetFile) {
         TransferSession session = new TransferSession();
         synchronized (lifecycleLock) {
-            if (closed) {
-                throw new RejectedExecutionException("TransferManager is closed");
+            if (closed || reserved) {
+                throw new RejectedExecutionException(closed ? "TransferManager is closed" : "TransferManager is reserved for restart");
             }
             activeSessions.add(session);
             try {
@@ -173,13 +174,13 @@ public final class TransferManager implements AutoCloseable {
         }
     }
     public void downloadMultiSource(List<PeerInfo> providers, vn.edu.p2p.common.model.FileRecord targetFile) {
-        if (closed) {
-            throw new RejectedExecutionException("TransferManager is closed");
+        if (closed || reserved) {
+            throw new RejectedExecutionException(closed ? "TransferManager is closed" : "TransferManager is reserved for restart");
         }
         TransferSession session = new TransferSession();
         synchronized (lifecycleLock) {
-            if (closed) {
-                throw new RejectedExecutionException("TransferManager is closed");
+            if (closed || reserved) {
+                throw new RejectedExecutionException(closed ? "TransferManager is closed" : "TransferManager is reserved for restart");
             }
             activeSessions.add(session);
             try {
@@ -198,6 +199,36 @@ public final class TransferManager implements AutoCloseable {
             }
         }
     }
+    public boolean tryReserveRestart() {
+        synchronized (lifecycleLock) {
+            if (closed || reserved || !activeSessions.isEmpty()) {
+                return false;
+            }
+            reserved = true;
+            return true;
+        }
+    }
+
+    public void cancelRestartReservation() {
+        synchronized (lifecycleLock) {
+            if (!closed) {
+                reserved = false;
+            }
+        }
+    }
+
+    public boolean isReserved() {
+        synchronized (lifecycleLock) {
+            return reserved;
+        }
+    }
+
+    public boolean hasActiveSessions() {
+        synchronized (lifecycleLock) {
+            return !activeSessions.isEmpty();
+        }
+    }
+
 
     public void shutdown() throws IOException {
         synchronized (lifecycleLock) {

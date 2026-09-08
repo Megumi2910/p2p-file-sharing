@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        run: |
+          git fetch origin main:main
+          if ! git merge-base --is-ancestor ${{ github.sha }} main; then
+            echo "Error: Tagged commit is not an ancestor of main branch." >&2
+            exit 1
+          fi
+
+      - name: Validate tag grammar
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Error: Tag '$TAG' must strictly match vMAJOR.MINOR.PATCH without leading zeros." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Validated version: $VERSION"
+
+      - name: Verify public key variable configured
+        run: |
+          if [ -z "${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}" ]; then
+            echo "Error: Repository variable CLIENT_UPDATE_PUBLIC_KEY is not configured." >&2
+            echo "Owner must generate a keypair via ReleaseTool and set this variable." >&2
+            exit 1
+          fi
+
+  build-and-verify:
+    name: Build & verify (${{ matrix.os }})
+    needs: validate-tag
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build and verify package
+        run: mvn -B -ntp clean verify -Pclient-release -Dclient.version=${{ needs.validate-tag.outputs.version }} -Dclient.update.publicKey=${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
+
+      - name: Run ClientUpdateSmoke (Ubuntu)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a java -Djava.awt.headless=false -cp "peer-app/target/peer-app.jar:tracker-server/target/tracker-server.jar:peer-app/target/test-classes" vn.edu.p2p.peer.ClientUpdateSmoke
+
+      - name: Run ClientUpdateSmoke (Windows)
+        if: runner.os == 'Windows'
+        run: java -Djava.awt.headless=false -cp "peer-app/target/peer-app.jar;tracker-server/target/tracker-server.jar;peer-app/target/test-classes" vn.edu.p2p.peer.ClientUpdateSmoke
+
+      - name: Upload release artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            peer-app/target/peer-app.jar
+            peer-app/target/p2p-client-${{ needs.validate-tag.outputs.version }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish release
+    needs: [ validate-tag, build-and-verify ]
+    runs-on: ubuntu-latest
+    environment: client-release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Sign release artifacts
+        env:
+          CLIENT_RELEASE_PRIVATE_KEY: ${{ secrets.CLIENT_RELEASE_PRIVATE_KEY }}
+        run: |
+          mkdir -p release-output
+          JAR="artifacts/peer-app.jar"
+          ZIP="artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip"
+          java -cp "$JAR" tools/ReleaseTool.java sign "$JAR" "$ZIP" release-output
+
+      - name: Verify signed release bundle
+        run: |
+          JAR="artifacts/peer-app.jar"
+          ZIP="artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip"
+          echo "${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}" > release-output/public.key
+          java -cp "$JAR" tools/ReleaseTool.java verify release-output/update-manifest.json release-output/update-manifest.sig "$JAR" "$ZIP" release-output/public.key
+          rm release-output/public.key
+
+      - name: Create draft release on GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ needs.validate-tag.outputs.version }}"
+          gh release create "$TAG" \
+            artifacts/peer-app.jar \
+            "artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip" \
+            release-output/update-manifest.json \
+            release-output/update-manifest.sig \
+            release-output/SHA256SUMS \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --repo "${{ github.repository }}"
+
+      - name: Publish draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ needs.validate-tag.outputs.version }}"
+          gh release edit "$TAG" --draft=false --latest --verify-tag --repo "${{ github.repository }}"

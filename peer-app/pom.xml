@@ -9,6 +9,13 @@
     </parent>
     <artifactId>peer-app</artifactId>
 
+    <properties>
+        <client.version>0.0.0-dev</client.version>
+        <client.update.publicKey></client.update.publicKey>
+        <client.update.repository>Megumi2910/p2p-file-sharing</client.update.repository>
+        <client.installer.protocol>1</client.installer.protocol>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>vn.edu.p2p</groupId>
@@ -31,9 +38,30 @@
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.13.2</version>
+        </dependency>
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>vn/edu/p2p/peer/update/build.properties</exclude>
+                </excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>vn/edu/p2p/peer/update/build.properties</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -57,4 +85,59 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>client-release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-assembly-plugin</artifactId>
+                        <version>3.8.0</version>
+                        <executions>
+                            <execution>
+                                <id>make-client-assembly</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>single</goal>
+                                </goals>
+                                <configuration>
+                                    <descriptors>
+                                        <descriptor>src/assembly/client.xml</descriptor>
+                                    </descriptors>
+                                    <finalName>p2p-client-${client.version}</finalName>
+                                    <appendAssemblyId>false</appendAssemblyId>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>validate-release-package</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${java.home}/bin/java</executable>
+                                    <arguments>
+                                        <argument>-cp</argument>
+                                        <argument>${project.build.directory}/peer-app.jar</argument>
+                                        <argument>${project.basedir}/../tools/ReleaseTool.java</argument>
+                                        <argument>validate</argument>
+                                        <argument>${project.build.directory}/peer-app.jar</argument>
+                                        <argument>${project.build.directory}/p2p-client-${client.version}.zip</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

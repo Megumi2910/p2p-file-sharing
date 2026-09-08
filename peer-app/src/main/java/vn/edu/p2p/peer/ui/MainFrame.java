@@ -65,12 +65,20 @@ public final class MainFrame extends JFrame implements TransferListener {
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     private final PeerRuntime runtime;
+    private final vn.edu.p2p.peer.config.ConfigStore configStore;
+    private final vn.edu.p2p.peer.update.UpdateService updateService;
+    private final vn.edu.p2p.peer.update.RestartCoordinator restartCoordinator;
+
+    private SettingsDialog settingsDialog;
+    private UpdateDialog updateDialog;
 
     // Header controls
     private final JLabel subtitleLabel = new JLabel("Peer: Starting...");
     private final JComboBox<String> themeCombo = new JComboBox<>(new String[]{"Light", "Dark"});
-    private final JButton peerDetailsButton = new JButton("Peer details");
-
+    private final JButton settingsButton = new JButton("Settings...");
+    private final JButton updateButton = new JButton("Software updates...");
+    private final JLabel updateBadgeLabel = new JLabel();
+    private Runnable closeHandler;
     // Peer panel controls
     private final DefaultListModel<PeerInfo> peerModel = new DefaultListModel<>();
     private final JList<PeerInfo> peerList = new JList<>(peerModel);
@@ -117,14 +125,36 @@ public final class MainFrame extends JFrame implements TransferListener {
     private long searchSequence = 0;
     private boolean ignoreThemeEvents = false;
 
-    public MainFrame(PeerRuntime runtime) {
+    public MainFrame(
+            PeerRuntime runtime,
+            vn.edu.p2p.peer.config.ConfigStore configStore,
+            vn.edu.p2p.peer.update.UpdateService updateService,
+            vn.edu.p2p.peer.update.RestartCoordinator restartCoordinator
+    ) {
         super("P2P File Sharing - " + runtime.config().displayName());
-        this.runtime = runtime;
+        this.runtime = java.util.Objects.requireNonNull(runtime, "runtime cannot be null");
+        this.configStore = java.util.Objects.requireNonNull(configStore, "configStore cannot be null");
+        this.updateService = java.util.Objects.requireNonNull(updateService, "updateService cannot be null");
+        this.restartCoordinator = restartCoordinator;
         buildUi();
+        wireUpdateListener();
     }
 
+    public void setCloseHandler(Runnable closeHandler) {
+        this.closeHandler = closeHandler;
+    }
     private void buildUi() {
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                if (closeHandler != null) {
+                    closeHandler.run();
+                } else {
+                    dispose();
+                }
+            }
+        });
         setLocationByPlatform(true);
 
         applyWindowBounds();
@@ -202,13 +232,12 @@ public final class MainFrame extends JFrame implements TransferListener {
         titlePanel.add(subtitleLabel);
         header.add(titlePanel, BorderLayout.WEST);
 
-        // Right: Peer details button + Theme selector
+        // Right: Settings button + Theme selector
         JPanel controlsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
 
-        peerDetailsButton.putClientProperty("html.disable", Boolean.TRUE);
-        peerDetailsButton.addActionListener(e -> showPeerDetailsDialog());
-        controlsPanel.add(peerDetailsButton);
-
+        settingsButton.putClientProperty("html.disable", Boolean.TRUE);
+        settingsButton.addActionListener(e -> openSettingsDialog());
+        controlsPanel.add(settingsButton);
         JLabel themeLabel = new JLabel("Theme:");
         themeLabel.setLabelFor(themeCombo);
         themeLabel.putClientProperty("html.disable", Boolean.TRUE);
@@ -233,8 +262,20 @@ public final class MainFrame extends JFrame implements TransferListener {
 
         header.add(controlsPanel, BorderLayout.EAST);
 
+        // Separate toolbar for updates
+        JPanel updateToolBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        updateToolBar.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        updateButton.putClientProperty("html.disable", Boolean.TRUE);
+        updateButton.addActionListener(e -> openUpdateDialog());
+        updateToolBar.add(updateButton);
+
+        updateBadgeLabel.putClientProperty("html.disable", Boolean.TRUE);
+        updateBadgeLabel.setVisible(false);
+        updateToolBar.add(updateBadgeLabel);
+
         JPanel headerWrapper = new JPanel(new BorderLayout());
-        headerWrapper.add(header, BorderLayout.CENTER);
+        headerWrapper.add(header, BorderLayout.NORTH);
+        headerWrapper.add(updateToolBar, BorderLayout.CENTER);
         headerWrapper.add(new JSeparator(SwingConstants.HORIZONTAL), BorderLayout.SOUTH);
         return headerWrapper;
     }
@@ -619,65 +660,36 @@ public final class MainFrame extends JFrame implements TransferListener {
         }
     }
 
-    private void showPeerDetailsDialog() {
-        JDialog dialog = new JDialog(this, "Peer details", false);
-
-        JPanel panel = new JPanel(new GridBagLayout());
-        panel.setPreferredSize(new Dimension(540, 300));
-        panel.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.anchor = GridBagConstraints.NORTHWEST;
-        gbc.insets = new Insets(4, 4, 6, 8);
-
-        JLabel heading = new JLabel("Configured Peer Details");
-        heading.putClientProperty("FlatLaf.styleClass", "h3");
-        heading.putClientProperty("html.disable", Boolean.TRUE);
-        gbc.gridx = 0;
-        gbc.gridy = 0;
-        gbc.gridwidth = 2;
-        panel.add(heading, gbc);
-
-        gbc.gridwidth = 1;
-        addDetailRow(panel, gbc, 1, "Peer Name:", runtime.config().displayName());
-        addDetailRow(panel, gbc, 2, "Peer ID:", runtime.config().peerId());
-        addDetailRow(panel, gbc, 3, "Listen Port:", String.valueOf(runtime.config().peerPort()));
-        addDetailRow(panel, gbc, 4, "Configured Tracker:", runtime.config().trackerHost() + ":" + runtime.config().trackerPort());
-        addDetailRow(panel, gbc, 5, "Shared Folder:", runtime.config().sharedDir().toAbsolutePath().toString());
-        addDetailRow(panel, gbc, 6, "Download Folder:", runtime.config().downloadDir().toAbsolutePath().toString());
-
-        JButton closeBtn = new JButton("Close");
-        closeBtn.addActionListener(e -> dialog.dispose());
-        gbc.gridx = 1;
-        gbc.gridy = 7;
-        gbc.anchor = GridBagConstraints.EAST;
-        gbc.fill = GridBagConstraints.NONE;
-        panel.add(closeBtn, gbc);
-
-        dialog.setContentPane(panel);
-        dialog.pack();
-        dialog.setLocationRelativeTo(this);
-        dialog.setVisible(true);
+    private void openSettingsDialog() {
+        if (settingsDialog == null || !settingsDialog.isDisplayable()) {
+            settingsDialog = new SettingsDialog(this, configStore, runtime, restartCoordinator);
+        }
+        settingsDialog.setVisible(true);
+        settingsDialog.toFront();
     }
 
-    private void addDetailRow(JPanel panel, GridBagConstraints gbc, int row, String label, String value) {
-        gbc.gridx = 0;
-        gbc.gridy = row;
-        gbc.weightx = 0;
-        JLabel lbl = new JLabel(label);
-        lbl.putClientProperty("html.disable", Boolean.TRUE);
-        panel.add(lbl, gbc);
+    private void openUpdateDialog() {
+        if (updateDialog == null || !updateDialog.isDisplayable()) {
+            updateDialog = new UpdateDialog(this, updateService, runtime, restartCoordinator);
+        }
+        updateDialog.setVisible(true);
+        updateDialog.toFront();
+    }
 
-        gbc.gridx = 1;
-        gbc.weightx = 1.0;
-        JTextArea valArea = new JTextArea(value);
-        valArea.setColumns(35);
-        valArea.setLineWrap(true);
-        valArea.setWrapStyleWord(true);
-        valArea.setOpaque(false);
-        valArea.setFont(UIManager.getFont("Label.font"));
-        valArea.putClientProperty("html.disable", Boolean.TRUE);
-        panel.add(valArea, gbc);
+    private void wireUpdateListener() {
+        updateService.addListener(snapshot -> SwingUtilities.invokeLater(() -> {
+            if (snapshot.state() == vn.edu.p2p.peer.update.UpdateService.UpdateState.UPDATE_AVAILABLE) {
+                updateBadgeLabel.setText("Update available: " + snapshot.availableVersion());
+                updateBadgeLabel.setForeground(new Color(0, 120, 215));
+                updateBadgeLabel.setVisible(true);
+            } else if (snapshot.state() == vn.edu.p2p.peer.update.UpdateService.UpdateState.READY_TO_RESTART) {
+                updateBadgeLabel.setText("Update ready to install");
+                updateBadgeLabel.setForeground(new Color(0, 150, 0));
+                updateBadgeLabel.setVisible(true);
+            } else {
+                updateBadgeLabel.setVisible(false);
+            }
+        }));
     }
 
     public void setStarting(boolean starting) {

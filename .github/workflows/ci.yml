@@ -35,4 +35,5 @@ jobs:
 
       - name: Run ClientUpdateSmoke (Windows)
         if: runner.os == 'Windows'
-        run: java -Djava.awt.headless=false -cp "peer-app/target/peer-app.jar;tracker-server/target/tracker-server.jar;peer-app/target/test-classes" vn.edu.p2p.peer.ClientUpdateSmoke
+        shell: bash
+        run: java "-Djava.awt.headless=false" -cp "peer-app/target/peer-app.jar;tracker-server/target/tracker-server.jar;peer-app/target/test-classes" vn.edu.p2p.peer.ClientUpdateSmoke

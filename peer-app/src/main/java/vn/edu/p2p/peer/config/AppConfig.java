@@ -131,9 +131,24 @@ public record AppConfig(
         return fromProperties(p);
     }
 
+    public static String parsePeerId(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException("Missing required property: peer.id");
+        }
+        for (int i = 0; i < raw.length(); i++) {
+            if (Character.isISOControl(raw.charAt(i))) {
+                throw new IllegalArgumentException("Property peer.id contains ISO control character");
+            }
+        }
+        String trimmed = raw.trim();
+        if (trimmed.length() > 255) {
+            throw new IllegalArgumentException("peerId exceeds 255 characters");
+        }
+        return trimmed;
+    }
+
     static AppConfig fromProperties(Properties p) {
-        String rawPeerId = p.getProperty("peer.id");
-        validateNoIsoControls("peer.id", rawPeerId);
+        String peerId = parsePeerId(p.getProperty("peer.id"));
         String rawDisplayName = p.getProperty("peer.name");
         validateNoIsoControls("peer.name", rawDisplayName);
 
@@ -178,7 +193,7 @@ public record AppConfig(
         int maxConcurrent = Integer.parseInt(p.getProperty("transfer.max.concurrent", "4"));
 
         return new AppConfig(
-                rawPeerId.trim(),
+                peerId,
                 rawDisplayName.trim(),
                 peerPort,
                 trackerHost.trim(),

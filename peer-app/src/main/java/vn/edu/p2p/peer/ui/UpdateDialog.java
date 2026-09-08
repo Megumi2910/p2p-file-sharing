@@ -1,9 +1,10 @@
 package vn.edu.p2p.peer.ui;
 
 import vn.edu.p2p.peer.PeerRuntime;
+import vn.edu.p2p.peer.config.ConfigStore;
+import vn.edu.p2p.peer.update.ClientVersion;
 import vn.edu.p2p.peer.update.RestartCoordinator;
 import vn.edu.p2p.peer.update.UpdateService;
-
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -41,7 +42,7 @@ public class UpdateDialog extends JDialog {
     private final UpdateService updateService;
     private final PeerRuntime runtime;
     private final RestartCoordinator restartCoordinator;
-
+    private final ConfigStore configStore;
     private final JLabel currentVersionLabel = new JLabel();
     private final JLabel statusLabel = new JLabel("Status: Not checked");
     private final JLabel detailLabel = new JLabel();
@@ -61,13 +62,14 @@ public class UpdateDialog extends JDialog {
             JFrame owner,
             UpdateService updateService,
             PeerRuntime runtime,
-            RestartCoordinator restartCoordinator
+            RestartCoordinator restartCoordinator,
+            ConfigStore configStore
     ) {
         super(owner, "Software Updates", false);
         this.updateService = Objects.requireNonNull(updateService, "updateService cannot be null");
         this.runtime = runtime;
         this.restartCoordinator = restartCoordinator;
-
+        this.configStore = Objects.requireNonNull(configStore, "configStore cannot be null");
         this.notesScrollPane = new JScrollPane(notesArea);
         this.updateListener = snapshot -> SwingUtilities.invokeLater(() -> applySnapshot(snapshot));
 
@@ -258,7 +260,7 @@ public class UpdateDialog extends JDialog {
                 statusLabel.setText("Status: Ready to restart and install");
                 detailLabel.setText("Update " + snapshot.availableVersion() + " is verified and staged.");
                 progressBar.setVisible(false);
-                checkButton.setEnabled(true);
+                checkButton.setEnabled(false);
                 downloadButton.setVisible(false);
                 cancelButton.setVisible(false);
                 installButton.setVisible(true);
@@ -297,33 +299,62 @@ public class UpdateDialog extends JDialog {
         if (snapshot.releaseNotes() != null && !snapshot.releaseNotes().isBlank()) {
             notesArea.setText(snapshot.releaseNotes());
             notesArea.setCaretPosition(0);
+        } else {
+            notesArea.setText("");
         }
     }
 
     private void onInstallAndRestart() {
-        if (restartCoordinator == null || runtime == null) {
+        if (restartCoordinator == null || runtime == null || configStore == null) {
+            return;
+        }
+
+        if (getOwner() instanceof MainFrame mainFrame && mainFrame.hasUnsavedSettings()) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Save or cancel settings first",
+                    "Settings Not Saved",
+                    JOptionPane.WARNING_MESSAGE
+            );
             return;
         }
 
         int choice = JOptionPane.showConfirmDialog(
                 this,
-                "Restart and install update now?\nAll transfers will complete or close safely before restarting.",
+                "Restart and install update now?\nActive transfers or prompt decisions will prevent restart.",
                 "Confirm Update",
                 JOptionPane.YES_NO_OPTION
         );
         if (choice != JOptionPane.YES_OPTION) {
             return;
         }
-
-        updateService.markRestarting();
+        installButton.setEnabled(false);
+        checkButton.setEnabled(false);
+        closeButton.setEnabled(false);
+        if (getOwner() instanceof MainFrame mainFrame) {
+            mainFrame.freezeForRestart(true);
+        }
 
         new Thread(() -> {
             try {
-                restartCoordinator.installPreparedUpdate(runtime, updateService, msg -> {
+                restartCoordinator.installPreparedUpdate(runtime, configStore, updateService, msg -> {
                     SwingUtilities.invokeLater(() -> detailLabel.setText(msg));
+                });
+            } catch (RestartCoordinator.RestartFailure ex) {
+                SwingUtilities.invokeLater(() -> {
+                    detailLabel.setText("Update stopped: " + ex.getMessage());
+                    if (getOwner() instanceof MainFrame mainFrame) {
+                        mainFrame.setStopped("Stopped — relaunch manually\nConfig: " + configStore.targetPath() + "\nCwd: " + configStore.workingDirectory() + "\nError: " + ex.getMessage());
+                    }
+                    dispose();
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
+                    if (getOwner() instanceof MainFrame mainFrame) {
+                        mainFrame.freezeForRestart(false);
+                    }
+                    installButton.setEnabled(true);
+                    closeButton.setEnabled(true);
                     detailLabel.setText("Update failed: " + ex.getMessage());
                     JOptionPane.showMessageDialog(this, "Could not restart: " + ex.getMessage(), "Update Error", JOptionPane.ERROR_MESSAGE);
                 });

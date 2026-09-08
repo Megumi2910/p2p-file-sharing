@@ -5,9 +5,11 @@ import vn.edu.p2p.peer.PeerApplication;
 import javax.swing.SwingUtilities;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -53,11 +55,12 @@ public class UpdateService implements AutoCloseable {
 
     private final Object stateLock = new Object();
     private UpdateSnapshot currentSnapshot;
-    private AtomicBoolean downloadCancelled;
+    private ReleaseClient.Cancellation activeCheckCancellation;
+    private ReleaseClient.Cancellation activeDownloadCancellation;
     private volatile boolean closed = false;
 
     public UpdateService(ReleaseClient client) {
-        this(client, resolveInstallRoot(), null);
+        this(client, RestartCoordinator.resolveInstallRoot(), null);
     }
 
     public UpdateService(ReleaseClient client, Path installRoot) {
@@ -66,8 +69,8 @@ public class UpdateService implements AutoCloseable {
 
     UpdateService(ReleaseClient client, Path installRoot, ExecutorService executor) {
         this.client = Objects.requireNonNull(client, "client cannot be null");
-        this.installRoot = Objects.requireNonNull(installRoot, "installRoot cannot be null");
-        this.updateDir = installRoot.resolve(".p2p-update");
+        this.installRoot = installRoot != null ? installRoot.toAbsolutePath().normalize() : null;
+        this.updateDir = this.installRoot != null ? this.installRoot.resolve(".p2p-update") : null;
 
         if (executor != null) {
             this.executor = executor;
@@ -155,7 +158,12 @@ public class UpdateService implements AutoCloseable {
             if (closed) {
                 return;
             }
-            if (currentSnapshot.state() == UpdateState.CHECKING || currentSnapshot.state() == UpdateState.DOWNLOADING) {
+            UpdateState state = currentSnapshot.state();
+            if (state == UpdateState.CHECKING
+                    || state == UpdateState.DOWNLOADING
+                    || state == UpdateState.VERIFYING
+                    || state == UpdateState.READY_TO_RESTART
+                    || state == UpdateState.RESTARTING) {
                 return;
             }
             updateSnapshot(new UpdateSnapshot(
@@ -171,9 +179,14 @@ public class UpdateService implements AutoCloseable {
             ));
         }
 
+        ReleaseClient.Cancellation cancellation = new ReleaseClient.Cancellation();
+        synchronized (stateLock) {
+            this.activeCheckCancellation = cancellation;
+        }
+
         executor.submit(() -> {
             try {
-                ReleaseClient.CheckResult result = client.check();
+                ReleaseClient.CheckResult result = client.check(cancellation);
                 handleCheckResult(result);
             } catch (Exception ex) {
                 synchronized (stateLock) {
@@ -271,11 +284,25 @@ public class UpdateService implements AutoCloseable {
         ReleaseClient.ValidatedCandidate candidate;
         synchronized (stateLock) {
             if (closed) return;
+            if (installRoot == null || updateDir == null) {
+                updateSnapshot(new UpdateSnapshot(
+                        UpdateState.FAILED,
+                        currentSnapshot.installedVersion(),
+                        null,
+                        0,
+                        0,
+                        "Automated updates unsupported in current environment",
+                        "",
+                        null,
+                        null
+                ));
+                return;
+            }
             if (currentSnapshot.state() != UpdateState.UPDATE_AVAILABLE || currentSnapshot.candidate() == null) {
                 return;
             }
             candidate = currentSnapshot.candidate();
-            downloadCancelled = new AtomicBoolean(false);
+            activeDownloadCancellation = new ReleaseClient.Cancellation();
             updateSnapshot(new UpdateSnapshot(
                     UpdateState.DOWNLOADING,
                     currentSnapshot.installedVersion(),
@@ -288,14 +315,32 @@ public class UpdateService implements AutoCloseable {
                     null
             ));
         }
+        ReleaseClient.Cancellation cancellation = activeDownloadCancellation;
 
         executor.submit(() -> {
-            AtomicBoolean cancelled = downloadCancelled;
             Path partFile = updateDir.resolve("candidate.jar.part");
             Path targetFile = updateDir.resolve("candidate.jar");
+            UpdateLocks.FileLockHandle opLock = null;
 
             try {
-                Files.createDirectories(updateDir);
+                UpdateJournal.getOrCreateInstallId(updateDir, ReleaseClient.EXPECTED_REPOSITORY, installRoot);
+                opLock = UpdateLocks.tryAcquireOperationLock(updateDir);
+                if (opLock == null) {
+                    synchronized (stateLock) {
+                        updateSnapshot(new UpdateSnapshot(
+                                UpdateState.FAILED,
+                                currentSnapshot.installedVersion(),
+                                candidate.version(),
+                                0,
+                                candidate.jarSize(),
+                                "Another update operation is currently in progress",
+                                currentSnapshot.releaseNotes(),
+                                candidate,
+                                null
+                        ));
+                    }
+                    return;
+                }
 
                 client.downloadCandidateJar(candidate, partFile, (bytesRead, totalBytes) -> {
                     synchronized (stateLock) {
@@ -313,7 +358,7 @@ public class UpdateService implements AutoCloseable {
                             ));
                         }
                     }
-                }, cancelled);
+                }, cancellation);
 
                 synchronized (stateLock) {
                     updateSnapshot(new UpdateSnapshot(
@@ -329,11 +374,26 @@ public class UpdateService implements AutoCloseable {
                     ));
                 }
 
+                try (FileChannel fc = FileChannel.open(partFile, StandardOpenOption.WRITE)) {
+                    fc.force(true);
+                }
+
+                Path manifestPath = updateDir.resolve("update-manifest.json");
+                Files.write(manifestPath, candidate.manifestBytes(), StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                try (FileChannel fc = FileChannel.open(manifestPath, StandardOpenOption.WRITE)) {
+                    fc.force(true);
+                }
+
+                Path sigPath = updateDir.resolve("update-manifest.sig");
+                Files.write(sigPath, candidate.signatureBytes(), StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                try (FileChannel fc = FileChannel.open(sigPath, StandardOpenOption.WRITE)) {
+                    fc.force(true);
+                }
+
                 Files.move(partFile, targetFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
 
-                // Write update-manifest.json and update-manifest.sig beside candidate
-                Files.write(updateDir.resolve("update-manifest.json"), candidate.manifestBytes());
-                Files.write(updateDir.resolve("update-manifest.sig"), candidate.signatureBytes());
+                opLock.close();
+                opLock = null;
 
                 synchronized (stateLock) {
                     updateSnapshot(new UpdateSnapshot(
@@ -342,20 +402,21 @@ public class UpdateService implements AutoCloseable {
                             candidate.version(),
                             candidate.jarSize(),
                             candidate.jarSize(),
-                            "Update ready to restart and install",
+                            "Update ready to install. Restart to apply.",
                             currentSnapshot.releaseNotes(),
                             candidate,
                             targetFile
                     ));
                 }
             } catch (Exception ex) {
+                ex.printStackTrace();
                 try {
                     Files.deleteIfExists(partFile);
                 } catch (IOException ignored) {
                 }
 
                 synchronized (stateLock) {
-                    boolean wasCancelled = cancelled != null && cancelled.get();
+                    boolean wasCancelled = cancellation.isCancelled();
                     if (wasCancelled) {
                         updateSnapshot(new UpdateSnapshot(
                                 UpdateState.UPDATE_AVAILABLE,
@@ -382,30 +443,62 @@ public class UpdateService implements AutoCloseable {
                         ));
                     }
                 }
+            } finally {
+                if (opLock != null) {
+                    try {
+                        opLock.close();
+                    } catch (Exception ignored) {
+                    }
+                }
             }
         });
     }
 
     public void cancelDownload() {
         synchronized (stateLock) {
-            if (downloadCancelled != null) {
-                downloadCancelled.set(true);
+            if (activeDownloadCancellation != null) {
+                activeDownloadCancellation.cancel();
             }
         }
     }
 
-    public void markRestarting() {
+    UpdateSnapshot beginRestart() {
         synchronized (stateLock) {
+            if (closed) {
+                throw new IllegalStateException("Update service is closed");
+            }
+            if (currentSnapshot.state() != UpdateState.READY_TO_RESTART || currentSnapshot.candidate() == null) {
+                throw new IllegalStateException("No verified update candidate is ready for restart");
+            }
+            UpdateSnapshot prev = currentSnapshot;
             updateSnapshot(new UpdateSnapshot(
                     UpdateState.RESTARTING,
-                    currentSnapshot.installedVersion(),
-                    currentSnapshot.availableVersion(),
-                    currentSnapshot.bytesDownloaded(),
-                    currentSnapshot.totalBytes(),
+                    prev.installedVersion(),
+                    prev.availableVersion(),
+                    prev.bytesDownloaded(),
+                    prev.totalBytes(),
                     "Restarting application...",
-                    currentSnapshot.releaseNotes(),
-                    currentSnapshot.candidate(),
-                    currentSnapshot.downloadedCandidateJar()
+                    prev.releaseNotes(),
+                    prev.candidate(),
+                    prev.downloadedCandidateJar()
+            ));
+            return prev;
+        }
+    }
+
+    void restoreReady(UpdateSnapshot previous, String detail) {
+        synchronized (stateLock) {
+            if (closed) return;
+            updateSnapshot(new UpdateSnapshot(
+                    UpdateState.READY_TO_RESTART,
+                    previous.installedVersion(),
+                    previous.availableVersion(),
+                    previous.bytesDownloaded(),
+                    previous.totalBytes(),
+                    detail != null ? detail : previous.detail(),
+                    previous.releaseNotes(),
+                    previous.candidate(),
+                    previous.downloadedCandidateJar()
             ));
         }
     }
@@ -414,25 +507,15 @@ public class UpdateService implements AutoCloseable {
     public void close() {
         synchronized (stateLock) {
             closed = true;
-            cancelDownload();
+            if (activeCheckCancellation != null) {
+                activeCheckCancellation.cancel();
+            }
+            if (activeDownloadCancellation != null) {
+                activeDownloadCancellation.cancel();
+            }
         }
         if (ownsExecutor) {
             executor.shutdownNow();
         }
-    }
-
-    public static Path resolveInstallRoot() {
-        try {
-            var cs = PeerApplication.class.getProtectionDomain().getCodeSource();
-            if (cs != null && cs.getLocation() != null) {
-                URI uri = cs.getLocation().toURI();
-                Path path = Path.of(uri).toAbsolutePath().normalize();
-                if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".jar")) {
-                    return path.getParent();
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return Path.of(".").toAbsolutePath().normalize();
     }
 }

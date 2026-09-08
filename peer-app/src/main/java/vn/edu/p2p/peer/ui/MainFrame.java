@@ -670,10 +670,44 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     private void openUpdateDialog() {
         if (updateDialog == null || !updateDialog.isDisplayable()) {
-            updateDialog = new UpdateDialog(this, updateService, runtime, restartCoordinator);
+            updateDialog = new UpdateDialog(this, updateService, runtime, restartCoordinator, configStore);
         }
         updateDialog.setVisible(true);
         updateDialog.toFront();
+    }
+
+    public boolean hasUnsavedSettings() {
+        return settingsDialog != null && settingsDialog.isDisplayable() && settingsDialog.hasUnsavedChanges();
+    }
+
+    public void setStopped(String detail) {
+        SwingUtilities.invokeLater(() -> {
+            subtitleLabel.setText("Stopped — relaunch manually");
+            subtitleLabel.setForeground(Color.RED);
+            updateButton.setEnabled(false);
+            settingsButton.setEnabled(false);
+            refreshButton.setEnabled(false);
+            sendButton.setEnabled(false);
+            searchButton.setEnabled(false);
+            downloadButton.setEnabled(false);
+
+            JOptionPane.showMessageDialog(
+                    this,
+                    detail,
+                    "Application Stopped",
+                    JOptionPane.WARNING_MESSAGE
+            );
+        });
+    }
+
+    public void freezeForRestart(boolean freeze) {
+        SwingUtilities.invokeLater(() -> {
+            updateButton.setEnabled(!freeze);
+            settingsButton.setEnabled(!freeze);
+            if (settingsDialog != null && settingsDialog.isDisplayable()) {
+                settingsDialog.freezeEditing(freeze);
+            }
+        });
     }
 
     private void wireUpdateListener() {

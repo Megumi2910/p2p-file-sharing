@@ -1,9 +1,11 @@
 package tools;
 
+import vn.edu.p2p.peer.update.BuildInfo;
 import vn.edu.p2p.peer.update.ClientVersion;
 import vn.edu.p2p.peer.update.ReleaseManifest;
+import vn.edu.p2p.peer.update.UpdateJournal;
+import vn.edu.p2p.peer.util.HashUtil;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,12 +27,8 @@ import java.util.Base64;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.HexFormat;
-import java.util.Properties;
+import java.util.Objects;
 import java.util.Set;
-import java.util.jar.Attributes;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
-import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -74,6 +72,13 @@ public class ReleaseTool {
                     }
                     runVerify(Path.of(args[1]), Path.of(args[2]), Path.of(args[3]), Path.of(args[4]), Path.of(args[5]));
                 }
+                case "check-version" -> {
+                    if (args.length < 3) {
+                        System.err.println("Usage: ReleaseTool check-version <newVersion> <latestTag>");
+                        System.exit(1);
+                    }
+                    runCheckVersion(args[1], args[2]);
+                }
                 default -> {
                     System.err.println("Unknown command: " + mode);
                     printUsageAndExit();
@@ -92,19 +97,36 @@ public class ReleaseTool {
         System.err.println("  validate <jarPath> <zipPath>");
         System.err.println("  sign <jarPath> <zipPath> <outputDir>");
         System.err.println("  verify <manifestPath> <signaturePath> <jarPath> <zipPath> <publicKeyPath>");
+        System.err.println("  check-version <newVersion> <latestTag>");
         System.exit(1);
     }
 
+    public static void runCheckVersion(String newVersionStr, String latestTagStr) {
+        ClientVersion newVersion = ClientVersion.parse(newVersionStr);
+        ClientVersion latestVersion = ClientVersion.parseTag(latestTagStr);
+        if (newVersion.compareTo(latestVersion) <= 0) {
+            System.err.println("Error: Candidate version " + newVersion + " is not greater than latest release " + latestVersion);
+            System.exit(1);
+        }
+        System.out.println("Version check PASSED: " + newVersion + " > " + latestVersion);
+    }
+
     public static void runKeygen(Path dir) throws Exception {
-        Files.createDirectories(dir);
+        Objects.requireNonNull(dir, "directory cannot be null");
+        if (Files.isSymbolicLink(dir)) {
+            throw new SecurityException("Keygen directory cannot be a symbolic link: " + dir);
+        }
+
+        if (!Files.exists(dir)) {
+            Files.createDirectories(dir);
+            UpdateJournal.applyOwnerOnlyPermissions(dir, true);
+        }
+
         Path privPath = dir.resolve("private.key");
         Path pubPath = dir.resolve("public.key");
 
-        if (Files.exists(privPath)) {
-            throw new IOException("Private key file already exists: " + privPath);
-        }
-        if (Files.exists(pubPath)) {
-            throw new IOException("Public key file already exists: " + pubPath);
+        if (Files.isSymbolicLink(privPath) || Files.isSymbolicLink(pubPath)) {
+            throw new SecurityException("Key files cannot be symbolic links");
         }
 
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("Ed25519");
@@ -113,8 +135,23 @@ public class ReleaseTool {
         String privBase64 = Base64.getEncoder().encodeToString(kp.getPrivate().getEncoded());
         String pubBase64 = Base64.getEncoder().encodeToString(kp.getPublic().getEncoded());
 
-        Files.writeString(privPath, privBase64);
-        Files.writeString(pubPath, pubBase64);
+        boolean privCreated = false;
+        try {
+            Files.writeString(privPath, privBase64, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            privCreated = true;
+            UpdateJournal.applyOwnerOnlyPermissions(privPath, false);
+
+            Files.writeString(pubPath, pubBase64, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            UpdateJournal.applyOwnerOnlyPermissions(pubPath, false);
+        } catch (Exception ex) {
+            if (privCreated) {
+                try {
+                    Files.deleteIfExists(privPath);
+                } catch (IOException ignored) {
+                }
+            }
+            throw ex;
+        }
 
         byte[] pubSha = MessageDigest.getInstance("SHA-256").digest(kp.getPublic().getEncoded());
         String fingerprint = HexFormat.of().formatHex(pubSha);
@@ -134,52 +171,13 @@ public class ReleaseTool {
             throw new IOException("ZIP bundle not found: " + zipPath);
         }
 
-        // Validate JAR
-        ClientVersion version;
-        PublicKey publicKey;
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            Manifest mf = jar.getManifest();
-            if (mf == null) {
-                throw new SecurityException("JAR missing META-INF/MANIFEST.MF");
-            }
-            String mainClass = mf.getMainAttributes().getValue(Attributes.Name.MAIN_CLASS);
-            if (!"vn.edu.p2p.peer.PeerApplication".equals(mainClass)) {
-                throw new SecurityException("Main-Class mismatch: " + mainClass);
-            }
-
-            JarEntry bpEntry = jar.getJarEntry("vn/edu/p2p/peer/update/build.properties");
-            if (bpEntry == null) {
-                throw new SecurityException("JAR missing vn/edu/p2p/peer/update/build.properties");
-            }
-            Properties props = new Properties();
-            try (InputStream in = jar.getInputStream(bpEntry)) {
-                props.load(in);
-            }
-
-            String verStr = props.getProperty("version", props.getProperty("client.version", "")).trim();
-            if (verStr.isBlank() || verStr.startsWith("${") || verStr.contains("-dev")) {
-                throw new SecurityException("JAR contains development or unreplaced version: " + verStr);
-            }
-            version = ClientVersion.parse(verStr);
-
-            String repoStr = props.getProperty("repository", props.getProperty("client.repository", "")).trim();
-            if (!EXPECTED_REPOSITORY.equals(repoStr)) {
-                throw new SecurityException("JAR repository mismatch: " + repoStr);
-            }
-
-            String pubKeyStr = props.getProperty("publicKey", props.getProperty("client.publicKey", "")).trim();
-            if (pubKeyStr.isBlank() || pubKeyStr.startsWith("${")) {
-                throw new SecurityException("JAR missing embedded release public key");
-            }
-            byte[] pubBytes = Base64.getDecoder().decode(pubKeyStr);
-            KeyFactory kf = KeyFactory.getInstance("Ed25519");
-            publicKey = kf.generatePublic(new X509EncodedKeySpec(pubBytes));
-
-            String protoStr = props.getProperty("installerProtocol", props.getProperty("client.installerProtocol", "1")).trim();
-            if (!"1".equals(protoStr)) {
-                throw new SecurityException("JAR installer protocol mismatch: " + protoStr);
-            }
+        // Validate JAR using BuildInfo.readJar
+        BuildInfo buildInfo = BuildInfo.readJar(jarPath);
+        if (!buildInfo.canInstall()) {
+            throw new SecurityException("JAR is not installable (development mode, invalid version, or key mismatch): " + jarPath);
         }
+        ClientVersion version = buildInfo.version();
+        PublicKey publicKey = buildInfo.publicKey();
 
         // Validate ZIP
         Set<String> expectedEntries = Set.of(
@@ -190,7 +188,8 @@ public class ReleaseTool {
                 "p2p-client/peer.properties.example"
         );
 
-        String standaloneJarSha = sha256(jarPath);
+        String standaloneJarSha = HashUtil.sha256(jarPath);
+        long standaloneJarSize = Files.size(jarPath);
         String zipEmbeddedJarSha = null;
 
         try (ZipFile zip = new ZipFile(zipPath.toFile())) {
@@ -198,15 +197,45 @@ public class ReleaseTool {
             Set<String> foundEntries = new HashSet<>();
             while (en.hasMoreElements()) {
                 ZipEntry entry = en.nextElement();
-                String name = entry.getName().replace('\\', '/');
-                foundEntries.add(name);
-                if ("p2p-client/peer-app.jar".equals(name)) {
+                String rawName = entry.getName();
+                if (rawName.contains("\\")) {
+                    throw new SecurityException("Backslash aliases in ZIP entry name: " + rawName);
+                }
+                if (rawName.contains("..")) {
+                    throw new SecurityException("Path traversal in ZIP entry name: " + rawName);
+                }
+                if (!foundEntries.add(rawName)) {
+                    throw new SecurityException("Duplicate ZIP entry in archive: " + rawName);
+                }
+                if (!expectedEntries.contains(rawName)) {
+                    throw new SecurityException("Unexpected extra ZIP entry in archive: " + rawName);
+                }
+
+                if ("p2p-client/".equals(rawName)) {
+                    if (!entry.isDirectory()) {
+                        throw new SecurityException("p2p-client/ must be a directory entry in ZIP");
+                    }
+                } else {
+                    if (entry.isDirectory()) {
+                        throw new SecurityException("File entry cannot be directory in ZIP: " + rawName);
+                    }
+                }
+
+                if ("p2p-client/peer-app.jar".equals(rawName)) {
                     try (InputStream in = zip.getInputStream(entry)) {
                         MessageDigest md = MessageDigest.getInstance("SHA-256");
                         byte[] buf = new byte[64 * 1024];
                         int r;
+                        long totalRead = 0;
                         while ((r = in.read(buf)) != -1) {
+                            totalRead += r;
+                            if (totalRead > standaloneJarSize) {
+                                throw new SecurityException("ZIP embedded peer-app.jar exceeds standalone JAR size (" + totalRead + " > " + standaloneJarSize + ")");
+                            }
                             md.update(buf, 0, r);
+                        }
+                        if (totalRead != standaloneJarSize) {
+                            throw new SecurityException("ZIP embedded peer-app.jar size mismatch: " + totalRead + " vs " + standaloneJarSize);
                         }
                         zipEmbeddedJarSha = HexFormat.of().formatHex(md.digest());
                     }
@@ -256,7 +285,7 @@ public class ReleaseTool {
         long jarSize = Files.size(jarPath);
         String jarSha = val.jarSha();
         long zipSize = Files.size(zipPath);
-        String zipSha = sha256(zipPath);
+        String zipSha = HashUtil.sha256(zipPath);
 
         ReleaseManifest manifest = new ReleaseManifest(
                 1,
@@ -286,8 +315,8 @@ public class ReleaseTool {
         Files.write(manifestOut, manifestBytes);
         Files.write(sigOut, signatureBytes);
 
-        String manifestSha = sha256(manifestOut);
-        String sigSha = sha256(sigOut);
+        String manifestSha = HashUtil.sha256(manifestOut);
+        String sigSha = HashUtil.sha256(sigOut);
 
         String sumsContent = jarSha + "  peer-app.jar\n"
                 + zipSha + "  p2p-client-" + val.version() + ".zip\n"
@@ -303,6 +332,10 @@ public class ReleaseTool {
     }
 
     public static void runVerify(Path manifestPath, Path sigPath, Path jarPath, Path zipPath, Path pubKeyPath) throws Exception {
+        if (pubKeyPath == null || !Files.isRegularFile(pubKeyPath)) {
+            throw new IllegalArgumentException("Public key path required for verification: " + pubKeyPath);
+        }
+
         byte[] pubBytes = Base64.getDecoder().decode(Files.readString(pubKeyPath).trim());
         KeyFactory kf = KeyFactory.getInstance("Ed25519");
         PublicKey pubKey = kf.generatePublic(new X509EncodedKeySpec(pubBytes));
@@ -310,16 +343,28 @@ public class ReleaseTool {
         byte[] manifestBytes = Files.readAllBytes(manifestPath);
         byte[] sigBytes = Files.readAllBytes(sigPath);
 
+        // 1. Verify raw signature/hash envelope
         ReleaseManifest manifest = ReleaseManifest.parseAndVerify(manifestBytes, sigBytes, pubKey, EXPECTED_REPOSITORY);
 
+        // 2. Validate local artifacts
+        ValidationResult val = runValidate(jarPath, zipPath);
+
+        // 3. Bind returned version and key to manifest and supplied public key
+        if (!manifest.version().equals(val.version())) {
+            throw new SecurityException("Manifest version (" + manifest.version() + ") does not match JAR version (" + val.version() + ")");
+        }
+        if (!pubKey.equals(val.publicKey())) {
+            throw new SecurityException("Configured public key does not match embedded JAR public key");
+        }
+
         long jarSize = Files.size(jarPath);
-        String jarSha = sha256(jarPath);
+        String jarSha = HashUtil.sha256(jarPath);
         if (manifest.size() != jarSize || !manifest.sha256().equalsIgnoreCase(jarSha)) {
             throw new SecurityException("JAR size or SHA-256 mismatch against manifest");
         }
 
         long zipSize = Files.size(zipPath);
-        String zipSha = sha256(zipPath);
+        String zipSha = HashUtil.sha256(zipPath);
         if (manifest.bundle().size() != zipSize || !manifest.bundle().sha256().equalsIgnoreCase(zipSha)) {
             throw new SecurityException("ZIP size or SHA-256 mismatch against manifest");
         }
@@ -328,18 +373,4 @@ public class ReleaseTool {
     }
 
     public record ValidationResult(ClientVersion version, PublicKey publicKey, String jarSha) {}
-
-    private static String sha256(Path file) throws IOException {
-        try (InputStream in = Files.newInputStream(file)) {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] buf = new byte[64 * 1024];
-            int r;
-            while ((r = in.read(buf)) != -1) {
-                md.update(buf, 0, r);
-            }
-            return HexFormat.of().formatHex(md.digest());
-        } catch (Exception ex) {
-            throw new IOException("Failed to hash file: " + file, ex);
-        }
-    }
 }

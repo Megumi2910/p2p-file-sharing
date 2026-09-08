@@ -3,11 +3,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Check if peer-app.jar is missing but an interrupted update exists
-if [ ! -f "$SCRIPT_DIR/peer-app.jar" ] && [ ! -f "$SCRIPT_DIR/peer-app/target/peer-app.jar" ]; then
+# Prioritize missing canonical peer-app.jar + existing journal recovery over developer JAR fallback
+if [ ! -f "$SCRIPT_DIR/peer-app.jar" ]; then
     if [ -f "$SCRIPT_DIR/.p2p-update/helper.jar" ] && [ -f "$SCRIPT_DIR/.p2p-update/transaction.properties" ]; then
         echo "Interrupted update detected. Running recovery..."
-        java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -cp "$SCRIPT_DIR/.p2p-update/helper.jar" vn.edu.p2p.peer.update.UpdateInstaller --recover "$SCRIPT_DIR" || true
+        java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -cp "$SCRIPT_DIR/.p2p-update/helper.jar" vn.edu.p2p.peer.update.UpdateInstaller --recover "$SCRIPT_DIR"
+        if [ ! -f "$SCRIPT_DIR/peer-app.jar" ]; then
+            echo "Error: Recovery did not restore canonical peer-app.jar" >&2
+            exit 1
+        fi
     fi
 fi
 

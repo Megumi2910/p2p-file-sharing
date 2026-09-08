@@ -244,7 +244,13 @@ class ReleaseManifestTest {
         ClientVersion v1_9 = ClientVersion.parse("1.9.0");
         assertTrue(v1_10.compareTo(v1_9) > 0);
         assertTrue(v1_9.compareTo(v1_10) < 0);
-        assertEquals(0, v1_10.compareTo(ClientVersion.parse("v1.10.0")));
+        assertEquals(0, v1_10.compareTo(ClientVersion.parseTag("v1.10.0")));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parse("v1.10.0"));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parse("V1.10.0"));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parse(" 1.10.0"));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parse("1.10.0 "));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parseTag("1.10.0"));
+        assertThrows(IllegalArgumentException.class, () -> ClientVersion.parseTag("V1.10.0"));
 
         // Leading zeros rejected
         assertThrows(IllegalArgumentException.class, () -> ClientVersion.parse("01.0.0"));

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: client-stable-release-publication
   cancel-in-progress: false
 
 jobs:
@@ -25,28 +25,33 @@ jobs:
           fetch-depth: 0
 
       - name: Verify tag is on main
+        env:
+          TAG_COMMIT: ${{ github.sha }}
         run: |
           git fetch origin main:main
-          if ! git merge-base --is-ancestor ${{ github.sha }} main; then
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" main; then
             echo "Error: Tagged commit is not an ancestor of main branch." >&2
             exit 1
           fi
 
       - name: Validate tag grammar
         id: version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Error: Tag '$TAG' must strictly match vMAJOR.MINOR.PATCH without leading zeros." >&2
+          if [[ ! "$TAG_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Error: Tag '$TAG_NAME' must strictly match vMAJOR.MINOR.PATCH without leading zeros." >&2
             exit 1
           fi
-          VERSION="${TAG#v}"
+          VERSION="${TAG_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Validated version: $VERSION"
 
       - name: Verify public key variable configured
+        env:
+          PUB_KEY: ${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
         run: |
-          if [ -z "${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}" ]; then
+          if [ -z "$PUB_KEY" ]; then
             echo "Error: Repository variable CLIENT_UPDATE_PUBLIC_KEY is not configured." >&2
             echo "Owner must generate a keypair via ReleaseTool and set this variable." >&2
             exit 1
@@ -73,7 +78,11 @@ jobs:
           cache: 'maven'
 
       - name: Build and verify package
-        run: mvn -B -ntp clean verify -Pclient-release -Dclient.version=${{ needs.validate-tag.outputs.version }} -Dclient.update.publicKey=${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          PUB_KEY: ${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
+        run: mvn -B -ntp clean verify -Pclient-release -Dclient.version="$VERSION" -Dclient.update.publicKey="$PUB_KEY"
 
       - name: Run ClientUpdateSmoke (Ubuntu)
         if: runner.os == 'Linux'
@@ -117,42 +126,120 @@ jobs:
           name: release-artifacts
           path: artifacts
 
+      - name: Check against latest published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.validate-tag.outputs.version }}
+          JAR: artifacts/peer-app.jar
+          REPO: ${{ github.repository }}
+        run: |
+          if gh api "/repos/$REPO/releases/latest" > /tmp/latest_release.json 2>/dev/null; then
+            LATEST_TAG=$(jq -r '.tag_name // empty' /tmp/latest_release.json)
+            IS_DRAFT=$(jq -r '.draft // empty' /tmp/latest_release.json)
+            IS_PRERELEASE=$(jq -r '.prerelease // empty' /tmp/latest_release.json)
+            if [ -z "$LATEST_TAG" ] || [ "$IS_DRAFT" = "true" ] || [ "$IS_PRERELEASE" = "true" ]; then
+              echo "Error: Latest release response is malformed, draft, or prerelease" >&2
+              exit 1
+            fi
+            java -cp "$JAR" tools/ReleaseTool.java check-version "$NEW_VERSION" "$LATEST_TAG"
+          else
+            echo "No published release found or first release; proceeding."
+          fi
+
       - name: Sign release artifacts
         env:
           CLIENT_RELEASE_PRIVATE_KEY: ${{ secrets.CLIENT_RELEASE_PRIVATE_KEY }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
         run: |
           mkdir -p release-output
           JAR="artifacts/peer-app.jar"
-          ZIP="artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip"
+          ZIP="artifacts/p2p-client-$VERSION.zip"
           java -cp "$JAR" tools/ReleaseTool.java sign "$JAR" "$ZIP" release-output
 
       - name: Verify signed release bundle
+        env:
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          PUB_KEY: ${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
         run: |
           JAR="artifacts/peer-app.jar"
-          ZIP="artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip"
-          echo "${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}" > release-output/public.key
+          ZIP="artifacts/p2p-client-$VERSION.zip"
+          echo "$PUB_KEY" > release-output/public.key
           java -cp "$JAR" tools/ReleaseTool.java verify release-output/update-manifest.json release-output/update-manifest.sig "$JAR" "$ZIP" release-output/public.key
           rm release-output/public.key
 
       - name: Create draft release on GitHub
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
-          TAG="v${{ needs.validate-tag.outputs.version }}"
+          TAG="v$VERSION"
           gh release create "$TAG" \
             artifacts/peer-app.jar \
-            "artifacts/p2p-client-${{ needs.validate-tag.outputs.version }}.zip" \
+            "artifacts/p2p-client-$VERSION.zip" \
             release-output/update-manifest.json \
             release-output/update-manifest.sig \
             release-output/SHA256SUMS \
             --verify-tag \
             --draft \
             --generate-notes \
-            --repo "${{ github.repository }}"
+            --repo "$REPO"
+
+      - name: Read back and verify draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          REPO: ${{ github.repository }}
+          JAR: artifacts/peer-app.jar
+          PUB_KEY: ${{ vars.CLIENT_UPDATE_PUBLIC_KEY }}
+        run: |
+          TAG="v$VERSION"
+          mkdir -p /tmp/readback /tmp/downloaded
+
+          gh api "/repos/$REPO/releases/tags/$TAG" > /tmp/readback/draft.json
+
+          IS_DRAFT=$(jq -r '.draft' /tmp/readback/draft.json)
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "Error: Created release is not marked draft" >&2
+            exit 1
+          fi
+
+          READBACK_TAG=$(jq -r '.tag_name' /tmp/readback/draft.json)
+          if [ "$READBACK_TAG" != "$TAG" ]; then
+            echo "Error: Tag name mismatch in draft: expected $TAG but got $READBACK_TAG" >&2
+            exit 1
+          fi
+
+          ASSET_COUNT=$(jq '.assets | length' /tmp/readback/draft.json)
+          if [ "$ASSET_COUNT" -ne 5 ]; then
+            echo "Error: Expected 5 assets in draft release, found $ASSET_COUNT" >&2
+            exit 1
+          fi
+
+          # Download assets into fresh directory
+          gh release download "$TAG" --dir /tmp/downloaded --repo "$REPO"
+
+          # Compare sizes and byte content against local output
+          cmp -s artifacts/peer-app.jar /tmp/downloaded/peer-app.jar
+          cmp -s "artifacts/p2p-client-$VERSION.zip" "/tmp/downloaded/p2p-client-$VERSION.zip"
+          cmp -s release-output/update-manifest.json /tmp/downloaded/update-manifest.json
+          cmp -s release-output/update-manifest.sig /tmp/downloaded/update-manifest.sig
+          cmp -s release-output/SHA256SUMS /tmp/downloaded/SHA256SUMS
+
+          # Run strengthened ReleaseTool verify on downloaded files
+          echo "$PUB_KEY" > /tmp/readback/public.key
+          java -cp "$JAR" tools/ReleaseTool.java verify \
+            /tmp/downloaded/update-manifest.json \
+            /tmp/downloaded/update-manifest.sig \
+            /tmp/downloaded/peer-app.jar \
+            "/tmp/downloaded/p2p-client-$VERSION.zip" \
+            /tmp/readback/public.key
 
       - name: Publish draft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
-          TAG="v${{ needs.validate-tag.outputs.version }}"
-          gh release edit "$TAG" --draft=false --latest --verify-tag --repo "${{ github.repository }}"
+          TAG="v$VERSION"
+          gh release edit "$TAG" --draft=false --latest --verify-tag --repo "$REPO"

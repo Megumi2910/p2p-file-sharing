@@ -12,13 +12,17 @@ public record ClientVersion(int major, int minor, int patch) implements Comparab
 
     public static ClientVersion parse(String raw) {
         Objects.requireNonNull(raw, "Version string cannot be null");
-        String text = raw.trim();
-
-        if (text.startsWith("v") || text.startsWith("V")) {
-            text = text.substring(1);
+        if (raw.isEmpty()) {
+            throw new IllegalArgumentException("Version string cannot be empty");
+        }
+        if (Character.isWhitespace(raw.charAt(0)) || Character.isWhitespace(raw.charAt(raw.length() - 1))) {
+            throw new IllegalArgumentException("Whitespace not allowed in version string: '" + raw + "'");
+        }
+        if (raw.startsWith("v") || raw.startsWith("V")) {
+            throw new IllegalArgumentException("Version must not start with 'v' or 'V': " + raw);
         }
 
-        String[] parts = text.split("\\.", -1);
+        String[] parts = raw.split("\\.", -1);
         if (parts.length != 3) {
             throw new IllegalArgumentException("Version must have exactly 3 components (MAJOR.MINOR.PATCH): " + raw);
         }
@@ -28,6 +32,14 @@ public record ClientVersion(int major, int minor, int patch) implements Comparab
         int patch = parseComponent(parts[2], "patch", raw);
 
         return new ClientVersion(major, minor, patch);
+    }
+
+    public static ClientVersion parseTag(String tag) {
+        Objects.requireNonNull(tag, "Tag cannot be null");
+        if (!tag.startsWith("v")) {
+            throw new IllegalArgumentException("Version tag must start with lowercase 'v': " + tag);
+        }
+        return parse(tag.substring(1));
     }
 
     private static int parseComponent(String part, String name, String full) {

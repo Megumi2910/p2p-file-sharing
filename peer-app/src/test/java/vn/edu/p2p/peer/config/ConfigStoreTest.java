@@ -1,5 +1,6 @@
 package vn.edu.p2p.peer.config;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import vn.edu.p2p.peer.PeerRuntime;
@@ -8,8 +9,14 @@ import java.io.IOException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
-
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -248,5 +255,181 @@ class ConfigStoreTest {
                 store.save(snapshot, Map.of("peer.id", "p1", "peer.name", "Alice")));
 
         assertFalse(Files.exists(nonExistentDir));
+    }
+
+    @Test
+    void testSaveThroughSymlinkPreservesLinkAndUpdatesTarget(@TempDir Path tempDir) throws IOException {
+        Path target = tempDir.resolve("target.properties");
+        Files.writeString(target, "peer.id=p1\npeer.name=Alice\ncustom.key=preserved\n");
+
+        Path link = tempDir.resolve("link.properties");
+        try {
+            Files.createSymbolicLink(link, target);
+        } catch (FileSystemException | UnsupportedOperationException ex) {
+            Assumptions.abort("Symlink creation not supported on this platform: " + ex.getMessage());
+        }
+
+        ConfigStore store = new ConfigStore(link, tempDir);
+        ConfigSnapshot snapshot = store.read();
+        assertTrue(snapshot.exists());
+        assertEquals("Alice", snapshot.getProperty("peer.name"));
+
+        ConfigSnapshot saved = store.save(snapshot, Map.of("peer.name", "UpdatedAlice"));
+        assertEquals("UpdatedAlice", saved.getProperty("peer.name"));
+
+        // Symlink must still exist and point to target
+        assertTrue(Files.isSymbolicLink(link), "Link must remain a symlink");
+        assertEquals(target.toRealPath(), link.toRealPath());
+
+        // Target content must be updated and preserved
+        String targetContent = Files.readString(target);
+        assertTrue(targetContent.contains("UpdatedAlice"));
+        assertTrue(targetContent.contains("preserved"));
+    }
+
+    @Test
+    void testDanglingSymlinkThrowsIOException(@TempDir Path tempDir) throws IOException {
+        Path absentTarget = tempDir.resolve("absent_target.properties");
+        Path link = tempDir.resolve("dangling.properties");
+        try {
+            Files.createSymbolicLink(link, absentTarget);
+        } catch (FileSystemException | UnsupportedOperationException ex) {
+            Assumptions.abort("Symlink creation not supported on this platform: " + ex.getMessage());
+        }
+
+        ConfigStore store = new ConfigStore(link, tempDir);
+        assertThrows(IOException.class, store::read);
+    }
+
+    @Test
+    void testConcurrentSameJvmWritersOneWinsOneConflicts(@TempDir Path tempDir) throws Exception {
+        Path configFile = tempDir.resolve("concurrent.properties");
+        Files.writeString(configFile, "peer.id=p1\npeer.name=Initial\n");
+
+        ConfigStore store1 = new ConfigStore(configFile, tempDir);
+        ConfigStore store2 = new ConfigStore(configFile, tempDir);
+
+        ConfigSnapshot snapshot1 = store1.read();
+        ConfigSnapshot snapshot2 = store2.read();
+
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(2);
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger conflictCount = new AtomicInteger(0);
+        List<Throwable> unexpectedErrors = Collections.synchronizedList(new ArrayList<>());
+
+        Thread t1 = new Thread(() -> {
+            try {
+                startLatch.await();
+                store1.save(snapshot1, Map.of("peer.name", "Writer1"));
+                successCount.incrementAndGet();
+            } catch (ConfigConflictException ex) {
+                conflictCount.incrementAndGet();
+            } catch (Throwable t) {
+                unexpectedErrors.add(t);
+            } finally {
+                doneLatch.countDown();
+            }
+        });
+
+        Thread t2 = new Thread(() -> {
+            try {
+                startLatch.await();
+                store2.save(snapshot2, Map.of("peer.name", "Writer2"));
+                successCount.incrementAndGet();
+            } catch (ConfigConflictException ex) {
+                conflictCount.incrementAndGet();
+            } catch (Throwable t) {
+                unexpectedErrors.add(t);
+            } finally {
+                doneLatch.countDown();
+            }
+        });
+
+        t1.start();
+        t2.start();
+        startLatch.countDown();
+        assertTrue(doneLatch.await(10, TimeUnit.SECONDS));
+
+        assertTrue(unexpectedErrors.isEmpty(), "Unexpected errors: " + unexpectedErrors);
+        assertEquals(1, successCount.get(), "Exactly one writer must succeed");
+        assertEquals(1, conflictCount.get(), "Losing writer must receive ConfigConflictException");
+    }
+
+    @Test
+    void testLateExternalEditBeforeAtomicMoveCausesConflict(@TempDir Path tempDir) throws IOException {
+        Path configFile = tempDir.resolve("late_edit.properties");
+        Files.writeString(configFile, "peer.id=p1\npeer.name=Initial\n");
+
+        ConfigStore store = new ConfigStore(configFile, tempDir);
+        ConfigSnapshot snapshot = store.read();
+
+        store.fileSystemSeam = (tempFile, target) -> {
+            // Simulate late external edit right before atomic move
+            Files.writeString(target, "peer.id=p1\npeer.name=LateAttacker\n");
+        };
+
+        assertThrows(ConfigConflictException.class, () ->
+                store.save(snapshot, Map.of("peer.name", "AppWriter")));
+
+        // The winning external bytes must be untouched
+        assertEquals("LateAttacker", store.read().getProperty("peer.name"));
+    }
+
+    @Test
+    void testSyntaxExceptionPreservesSourceAndSnapshot(@TempDir Path tempDir) throws IOException {
+        Path configFile = tempDir.resolve("syntax_err.properties");
+        String badContent = "peer.id=p1\npeer.name=\\u12\n";
+        Files.writeString(configFile, badContent);
+
+        ConfigStore store = new ConfigStore(configFile, tempDir);
+        ConfigStore.SyntaxException ex = assertThrows(ConfigStore.SyntaxException.class, store::read);
+
+        assertEquals(badContent, ex.sourceText());
+        assertNotNull(ex.snapshot());
+        assertTrue(ex.snapshot().exists());
+        assertNotNull(ex.snapshot().sha256());
+    }
+
+    @Test
+    void testRepairSyntaxAtomicallySavesValidProperties(@TempDir Path tempDir) throws IOException {
+        Path configFile = tempDir.resolve("syntax_repair.properties");
+        String badContent = "peer.id=p1\npeer.name=\\u12\n";
+        Files.writeString(configFile, badContent);
+
+        ConfigStore store = new ConfigStore(configFile, tempDir);
+        ConfigStore.SyntaxException ex = assertThrows(ConfigStore.SyntaxException.class, store::read);
+
+        String repairedContent = "peer.id=p1\npeer.name=RepairedAlice\n";
+        ConfigSnapshot repaired = store.repairSyntax(ex.snapshot(), repairedContent);
+
+        assertEquals("RepairedAlice", repaired.getProperty("peer.name"));
+        assertEquals("RepairedAlice", store.read().getProperty("peer.name"));
+    }
+
+    @Test
+    void testCheckOnStartupValidation() {
+        ConfigSnapshot missing = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h", Map.of());
+        assertTrue(ConfigStore.checkOnStartup(missing));
+
+        ConfigSnapshot trueSnap = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h",
+                Map.of("updates.checkOnStartup", "true"));
+        assertTrue(ConfigStore.checkOnStartup(trueSnap));
+
+        ConfigSnapshot falseSnap = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h",
+                Map.of("updates.checkOnStartup", "false"));
+        assertFalse(ConfigStore.checkOnStartup(falseSnap));
+
+        ConfigSnapshot whitespaceSnap = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h",
+                Map.of("updates.checkOnStartup", " true "));
+        assertThrows(IllegalArgumentException.class, () -> ConfigStore.checkOnStartup(whitespaceSnap));
+
+        ConfigSnapshot blankSnap = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h",
+                Map.of("updates.checkOnStartup", ""));
+        assertThrows(IllegalArgumentException.class, () -> ConfigStore.checkOnStartup(blankSnap));
+
+        ConfigSnapshot invalidSnap = new ConfigSnapshot(Path.of("test"), Path.of("test"), true, "h",
+                Map.of("updates.checkOnStartup", "yes"));
+        assertThrows(IllegalArgumentException.class, () -> ConfigStore.checkOnStartup(invalidSnap));
     }
 }

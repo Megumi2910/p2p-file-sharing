@@ -11,29 +11,30 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.jar.Attributes;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
-import java.util.jar.Manifest;
 
 public class ReleaseClient {
 
@@ -46,6 +47,41 @@ public class ReleaseClient {
         UNSUPPORTED
     }
 
+    public static class Cancellation implements AutoCloseable {
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
+        private final List<Runnable> hooks = new ArrayList<>();
+
+        public synchronized void cancel() {
+            if (cancelled.compareAndSet(false, true)) {
+                for (Runnable hook : hooks) {
+                    try {
+                        hook.run();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                hooks.clear();
+            }
+        }
+
+        public boolean isCancelled() {
+            return cancelled.get();
+        }
+
+        public synchronized void onCancel(Runnable hook) {
+            if (hook == null) return;
+            if (cancelled.get()) {
+                hook.run();
+            } else {
+                hooks.add(hook);
+            }
+        }
+
+        @Override
+        public void close() {
+            cancel();
+        }
+    }
+
     public record ValidatedCandidate(
             ClientVersion version,
             ReleaseManifest manifest,
@@ -53,8 +89,8 @@ public class ReleaseClient {
             byte[] signatureBytes,
             String jarDownloadUrl,
             long jarSize,
-            String bundleDownloadUrl,
-            long bundleSize
+            String zipDownloadUrl,
+            long zipSize
     ) {}
 
     public record CheckResult(
@@ -65,11 +101,11 @@ public class ReleaseClient {
             String message
     ) {
         public static CheckResult available(ClientVersion version, String notes, ValidatedCandidate candidate) {
-            return new CheckResult(CheckStatus.AVAILABLE, version, notes, candidate, "Update available: " + version);
+            return new CheckResult(CheckStatus.AVAILABLE, version, notes, candidate, "Update available: v" + version);
         }
 
-        public static CheckResult upToDate(ClientVersion version) {
-            return new CheckResult(CheckStatus.UP_TO_DATE, version, "", null, "Client is up to date: " + version);
+        public static CheckResult upToDate(ClientVersion currentVersion) {
+            return new CheckResult(CheckStatus.UP_TO_DATE, currentVersion, "", null, "Application is up to date");
         }
 
         public static CheckResult noRelease(String message) {
@@ -94,8 +130,13 @@ public class ReleaseClient {
     }
 
     public interface HttpTransport {
-        TransportResponse send(URI uri, String method, Map<String, String> headers, Duration timeout)
-                throws IOException, InterruptedException;
+        TransportResponse send(
+                URI uri,
+                String method,
+                Map<String, String> headers,
+                Duration timeout,
+                Cancellation cancellation
+        ) throws IOException, InterruptedException;
     }
 
     public record TransportResponse(
@@ -174,13 +215,29 @@ public class ReleaseClient {
     }
 
     public CheckResult check() {
+        return check(null);
+    }
+
+    public CheckResult check(Cancellation cancellation) {
+        if (cancellation != null && cancellation.isCancelled()) {
+            return CheckResult.unavailable("Update check cancelled");
+        }
+
+        long deadlineNanos = System.nanoTime() + METADATA_TIMEOUT.toNanos();
+
         try {
             Map<String, String> headers = new HashMap<>();
             headers.put("Accept", "application/vnd.github+json");
             headers.put("User-Agent", "P2P-File-Sharing-Client/" + buildInfo.displayVersion() + " (Java 21)");
 
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return CheckResult.unavailable("Update check timed out");
+            }
+            Duration timeout = Duration.ofNanos(remainingNanos);
+
             byte[] jsonBytes;
-            try (TransportResponse resp = transport.send(latestReleaseEndpoint, "GET", headers, METADATA_TIMEOUT)) {
+            try (TransportResponse resp = transport.send(latestReleaseEndpoint, "GET", headers, timeout, cancellation)) {
                 int code = resp.statusCode();
                 if (code == 404) {
                     return CheckResult.noRelease("No published release");
@@ -188,8 +245,7 @@ public class ReleaseClient {
                 if (code == 403 || code == 429) {
                     String reset = resp.firstHeader("x-ratelimit-reset");
                     String retryAfter = resp.firstHeader("retry-after");
-                    String detail = retryAfter != null ? "retry after " + retryAfter + "s"
-                            : (reset != null ? "reset at " + reset : "rate limit exceeded");
+                    String detail = parseRetryReset(retryAfter, reset);
                     return CheckResult.unavailable("Checking unavailable: " + detail);
                 }
                 if (code != 200) {
@@ -198,14 +254,19 @@ public class ReleaseClient {
                 jsonBytes = resp.readAllBytesBounded(MAX_API_JSON_BYTES);
             }
 
-            GitHubRelease release = parseGitHubRelease(jsonBytes);
+            GitHubRelease release;
+            try {
+                release = parseGitHubRelease(jsonBytes);
+            } catch (Exception ex) {
+                return CheckResult.invalidRelease("Malformed release metadata: " + ex.getMessage());
+            }
             if (release.draft() || release.prerelease()) {
                 return CheckResult.noRelease("Latest release is marked draft or prerelease");
             }
 
             ClientVersion latestVersion;
             try {
-                latestVersion = ClientVersion.parse(release.tagName());
+                latestVersion = ClientVersion.parseTag(release.tagName());
             } catch (Exception ex) {
                 return CheckResult.invalidRelease("Release tag is not a valid version: " + release.tagName());
             }
@@ -243,8 +304,11 @@ public class ReleaseClient {
             validateInitialDownloadUrl(URI.create(jarAsset.downloadUrl()), latestVersion, "peer-app.jar");
             validateInitialDownloadUrl(URI.create(zipAsset.downloadUrl()), latestVersion, expectedZip);
 
-            byte[] manifestBytes = downloadBoundedBytes(URI.create(manifestAsset.downloadUrl()), latestVersion, "update-manifest.json", ReleaseManifest.MAX_MANIFEST_BYTES);
-            byte[] sigBytes = downloadBoundedBytes(URI.create(sigAsset.downloadUrl()), latestVersion, "update-manifest.sig", ReleaseManifest.EXPECTED_SIGNATURE_BYTES);
+            long manifestDeadline = System.nanoTime() + METADATA_TIMEOUT.toNanos();
+            byte[] manifestBytes = downloadBoundedBytes(URI.create(manifestAsset.downloadUrl()), latestVersion, "update-manifest.json", ReleaseManifest.MAX_MANIFEST_BYTES, manifestDeadline, cancellation);
+
+            long sigDeadline = System.nanoTime() + METADATA_TIMEOUT.toNanos();
+            byte[] sigBytes = downloadBoundedBytes(URI.create(sigAsset.downloadUrl()), latestVersion, "update-manifest.sig", ReleaseManifest.EXPECTED_SIGNATURE_BYTES, sigDeadline, cancellation);
 
             if (sigBytes.length != ReleaseManifest.EXPECTED_SIGNATURE_BYTES) {
                 return CheckResult.invalidRelease("Signature length invalid: " + sigBytes.length);
@@ -288,14 +352,40 @@ public class ReleaseClient {
         }
     }
 
+    private static String parseRetryReset(String retryAfter, String reset) {
+        if (retryAfter != null && !retryAfter.isBlank()) {
+            try {
+                long secs = Long.parseLong(retryAfter.trim());
+                if (secs >= 0) {
+                    return "retry after " + secs + "s";
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (reset != null && !reset.isBlank()) {
+            try {
+                long epoch = Long.parseLong(reset.trim());
+                if (epoch > 0) {
+                    return "reset at " + epoch;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return "rate limit exceeded";
+    }
+
     public void downloadCandidateJar(
             ValidatedCandidate candidate,
             Path destination,
             ProgressListener progressListener,
-            AtomicBoolean cancelled
+            Cancellation cancellation
     ) throws Exception {
         Objects.requireNonNull(candidate, "candidate cannot be null");
         Objects.requireNonNull(destination, "destination cannot be null");
+
+        if (cancellation != null && cancellation.isCancelled()) {
+            throw new IOException("Download cancelled by user");
+        }
 
         Path parent = destination.getParent();
         if (parent != null) {
@@ -312,22 +402,30 @@ public class ReleaseClient {
         long totalRead = 0;
         long expectedSize = candidate.jarSize();
 
+        long deadlineNanos = System.nanoTime() + JAR_TIMEOUT.toNanos();
+
         try (OutputStream out = Files.newOutputStream(destination, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
             int redirects = 0;
             while (true) {
-                if (cancelled != null && cancelled.get()) {
+                if (cancellation != null && cancellation.isCancelled()) {
                     throw new IOException("Download cancelled by user");
                 }
+
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new IOException("Download timed out (exceeded 5-minute budget)");
+                }
+                Duration timeout = Duration.ofNanos(remainingNanos);
 
                 Map<String, String> headers = new HashMap<>();
                 headers.put("User-Agent", "P2P-File-Sharing-Client/" + buildInfo.displayVersion());
 
-                try (TransportResponse resp = transport.send(currentUri, "GET", headers, JAR_TIMEOUT)) {
+                try (TransportResponse resp = transport.send(currentUri, "GET", headers, timeout, cancellation)) {
                     int status = resp.statusCode();
                     if (status >= 300 && status < 400) {
                         redirects++;
-                        if (redirects > 5) {
-                            throw new IOException("Too many redirects (> 5)");
+                        if (redirects > 3) {
+                            throw new IOException("Too many redirects (> 3)");
                         }
                         String location = resp.firstHeader("location");
                         if (location == null || location.isBlank()) {
@@ -344,12 +442,32 @@ public class ReleaseClient {
                         throw new IOException("Download failed with HTTP " + status);
                     }
 
+                    String encoding = resp.firstHeader("content-encoding");
+                    if (encoding != null && !encoding.isBlank() && !"identity".equalsIgnoreCase(encoding.trim())) {
+                        throw new IOException("Unexpected Content-Encoding: " + encoding);
+                    }
+
+                    String clHeader = resp.firstHeader("content-length");
+                    if (clHeader != null && !clHeader.isBlank()) {
+                        try {
+                            long cl = Long.parseLong(clHeader.trim());
+                            if (cl != expectedSize) {
+                                throw new IOException("Content-Length mismatch: expected " + expectedSize + " but got " + cl);
+                            }
+                        } catch (NumberFormatException ex) {
+                            throw new IOException("Invalid Content-Length header: " + clHeader);
+                        }
+                    }
+
                     byte[] buffer = new byte[64 * 1024];
                     InputStream in = resp.bodyStream();
                     int read;
                     while ((read = in.read(buffer)) != -1) {
-                        if (cancelled != null && cancelled.get()) {
+                        if (cancellation != null && cancellation.isCancelled()) {
                             throw new IOException("Download cancelled by user");
+                        }
+                        if (System.nanoTime() > deadlineNanos) {
+                            throw new IOException("Download timed out (exceeded 5-minute budget)");
                         }
                         totalRead += read;
                         if (totalRead > expectedSize) {
@@ -384,70 +502,51 @@ public class ReleaseClient {
                     + candidate.manifest().sha256() + " but computed " + computedSha256);
         }
 
-        verifyCandidateJarContents(destination, candidate);
-    }
+        try (FileChannel fc = FileChannel.open(destination, StandardOpenOption.WRITE)) {
+            fc.force(true);
+        }
 
-    private void verifyCandidateJarContents(Path jarPath, ValidatedCandidate candidate) throws Exception {
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            Manifest manifest = jar.getManifest();
-            if (manifest == null) {
-                throw new SecurityException("Candidate JAR missing META-INF/MANIFEST.MF");
-            }
-            Attributes mainAttrs = manifest.getMainAttributes();
-            String mainClass = mainAttrs.getValue(Attributes.Name.MAIN_CLASS);
-            if (!"vn.edu.p2p.peer.PeerApplication".equals(mainClass)) {
-                throw new SecurityException("Candidate JAR Main-Class mismatch: " + mainClass);
-            }
-
-            JarEntry buildEntry = jar.getJarEntry("vn/edu/p2p/peer/update/build.properties");
-            if (buildEntry == null) {
-                throw new SecurityException("Candidate JAR missing embedded build.properties");
-            }
-
-            Properties props = new Properties();
-            try (InputStream in = jar.getInputStream(buildEntry)) {
-                props.load(in);
-            }
-
-            BuildInfo candidateInfo = BuildInfo.fromProperties(props);
-            if (candidateInfo.isDevelopment() || candidateInfo.version() == null) {
-                throw new SecurityException("Candidate JAR has development or invalid version");
-            }
-            if (!candidateInfo.version().equals(candidate.version())) {
-                throw new SecurityException("Candidate JAR embedded version (" + candidateInfo.version()
-                        + ") does not match manifest (" + candidate.version() + ")");
-            }
-            if (!EXPECTED_REPOSITORY.equals(candidateInfo.repository())) {
-                throw new SecurityException("Candidate JAR embedded repository mismatch: " + candidateInfo.repository());
-            }
-            if (candidateInfo.installerProtocol() != 1) {
-                throw new SecurityException("Candidate JAR unsupported installer protocol: " + candidateInfo.installerProtocol());
-            }
-            if (buildInfo.publicKey() != null && !Objects.equals(buildInfo.publicKey(), candidateInfo.publicKey())) {
-                throw new SecurityException("Candidate JAR embedded public key does not match current trust key");
-            }
+        try {
+            ReleaseManifest.verifyJar(destination, candidate.manifest(), buildInfo.publicKey());
         } catch (Exception ex) {
-            Files.deleteIfExists(jarPath);
+            Files.deleteIfExists(destination);
             throw ex;
         }
     }
 
-    private byte[] downloadBoundedBytes(URI initialUri, ClientVersion version, String assetName, int maxBytes) throws IOException, InterruptedException {
+    private byte[] downloadBoundedBytes(
+            URI initialUri,
+            ClientVersion version,
+            String assetName,
+            int maxBytes,
+            long deadlineNanos,
+            Cancellation cancellation
+    ) throws IOException, InterruptedException {
         URI current = initialUri;
         Set<URI> visited = new HashSet<>();
         visited.add(current);
 
         int redirects = 0;
         while (true) {
+            if (cancellation != null && cancellation.isCancelled()) {
+                throw new IOException("Download cancelled by user");
+            }
+
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                throw new IOException("Metadata request timed out");
+            }
+            Duration timeout = Duration.ofNanos(remainingNanos);
+
             Map<String, String> headers = new HashMap<>();
             headers.put("User-Agent", "P2P-File-Sharing-Client/" + buildInfo.displayVersion());
 
-            try (TransportResponse resp = transport.send(current, "GET", headers, METADATA_TIMEOUT)) {
+            try (TransportResponse resp = transport.send(current, "GET", headers, timeout, cancellation)) {
                 int status = resp.statusCode();
                 if (status >= 300 && status < 400) {
                     redirects++;
-                    if (redirects > 5) {
-                        throw new IOException("Too many redirects (> 5)");
+                    if (redirects > 3) {
+                        throw new IOException("Too many redirects (> 3)");
                     }
                     String location = resp.firstHeader("location");
                     if (location == null || location.isBlank()) {
@@ -547,10 +646,23 @@ public class ReleaseClient {
         if (body == null) {
             return "";
         }
-        if (body.length() <= MAX_RELEASE_NOTES_BYTES) {
+        byte[] utf8 = body.getBytes(StandardCharsets.UTF_8);
+        if (utf8.length <= MAX_RELEASE_NOTES_BYTES) {
             return body;
         }
-        return body.substring(0, MAX_RELEASE_NOTES_BYTES) + "\n\n[Release notes truncated at 32 KiB]";
+        int byteCount = 0;
+        int charIndex = 0;
+        while (charIndex < body.length()) {
+            int codePoint = body.codePointAt(charIndex);
+            int charCount = Character.charCount(codePoint);
+            int cpBytes = Character.toString(codePoint).getBytes(StandardCharsets.UTF_8).length;
+            if (byteCount + cpBytes > MAX_RELEASE_NOTES_BYTES) {
+                break;
+            }
+            byteCount += cpBytes;
+            charIndex += charCount;
+        }
+        return body.substring(0, charIndex) + "\n\n[Release notes truncated at 32 KiB]";
     }
 
     private record GitHubRelease(String tagName, boolean draft, boolean prerelease, String body, Map<String, GitHubAsset> assets) {}
@@ -574,18 +686,38 @@ public class ReleaseClient {
                 throw new IllegalArgumentException("Duplicate field in GitHub release: " + name);
             }
             switch (name) {
-                case "tag_name" -> tagName = reader.nextString();
-                case "draft" -> draft = reader.nextBoolean();
-                case "prerelease" -> prerelease = reader.nextBoolean();
+                case "tag_name" -> {
+                    if (reader.peek() != JsonToken.STRING) {
+                        throw new IllegalArgumentException("Field tag_name must be a string");
+                    }
+                    tagName = reader.nextString();
+                }
+                case "draft" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) {
+                        throw new IllegalArgumentException("Field draft must be a boolean");
+                    }
+                    draft = reader.nextBoolean();
+                }
+                case "prerelease" -> {
+                    if (reader.peek() != JsonToken.BOOLEAN) {
+                        throw new IllegalArgumentException("Field prerelease must be a boolean");
+                    }
+                    prerelease = reader.nextBoolean();
+                }
                 case "body" -> {
                     if (reader.peek() == JsonToken.NULL) {
                         reader.nextNull();
                         body = "";
-                    } else {
+                    } else if (reader.peek() == JsonToken.STRING) {
                         body = reader.nextString();
+                    } else {
+                        throw new IllegalArgumentException("Field body must be a string or null");
                     }
                 }
                 case "assets" -> {
+                    if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+                        throw new IllegalArgumentException("Field assets must be an array");
+                    }
                     reader.beginArray();
                     while (reader.hasNext()) {
                         GitHubAsset asset = parseAsset(reader);
@@ -595,10 +727,14 @@ public class ReleaseClient {
                     }
                     reader.endArray();
                 }
-                default -> reader.skipValue();
+                default -> skipValueBounded(reader, 1);
             }
         }
         reader.endObject();
+
+        if (reader.peek() != JsonToken.END_DOCUMENT) {
+            throw new IllegalArgumentException("Trailing data after GitHub release JSON");
+        }
 
         if (tagName == null || draft == null || prerelease == null) {
             throw new IllegalArgumentException("GitHub release JSON missing required decision fields");
@@ -608,6 +744,9 @@ public class ReleaseClient {
     }
 
     private static GitHubAsset parseAsset(JsonReader reader) throws IOException {
+        if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+            throw new IllegalArgumentException("Asset must be an object");
+        }
         reader.beginObject();
         Set<String> fields = new HashSet<>();
         String name = null;
@@ -621,11 +760,26 @@ public class ReleaseClient {
                 throw new IllegalArgumentException("Duplicate field in asset: " + field);
             }
             switch (field) {
-                case "name" -> name = reader.nextString();
-                case "size" -> size = reader.nextLong();
-                case "state" -> state = reader.nextString();
-                case "browser_download_url" -> downloadUrl = reader.nextString();
-                default -> reader.skipValue();
+                case "name" -> {
+                    if (reader.peek() != JsonToken.STRING) {
+                        throw new IllegalArgumentException("Asset name must be a string");
+                    }
+                    name = reader.nextString();
+                }
+                case "size" -> size = ReleaseManifest.parseStrictLong(reader, "asset.size");
+                case "state" -> {
+                    if (reader.peek() != JsonToken.STRING) {
+                        throw new IllegalArgumentException("Asset state must be a string");
+                    }
+                    state = reader.nextString();
+                }
+                case "browser_download_url" -> {
+                    if (reader.peek() != JsonToken.STRING) {
+                        throw new IllegalArgumentException("Asset browser_download_url must be a string");
+                    }
+                    downloadUrl = reader.nextString();
+                }
+                default -> skipValueBounded(reader, 1);
             }
         }
         reader.endObject();
@@ -643,15 +797,56 @@ public class ReleaseClient {
         return new GitHubAsset(name, size, state, downloadUrl);
     }
 
-    private static class DefaultHttpTransport implements HttpTransport {
-        private final HttpClient client = HttpClient.newBuilder()
-                .connectTimeout(CONNECT_TIMEOUT)
-                .followRedirects(HttpClient.Redirect.NEVER)
-                .build();
+    private static void skipValueBounded(JsonReader reader, int depth) throws IOException {
+        if (depth > 32) {
+            throw new IllegalArgumentException("JSON nesting depth exceeded maximum of 32");
+        }
+        switch (reader.peek()) {
+            case BEGIN_ARRAY -> {
+                reader.beginArray();
+                while (reader.hasNext()) {
+                    skipValueBounded(reader, depth + 1);
+                }
+                reader.endArray();
+            }
+            case BEGIN_OBJECT -> {
+                reader.beginObject();
+                while (reader.hasNext()) {
+                    reader.nextName();
+                    skipValueBounded(reader, depth + 1);
+                }
+                reader.endObject();
+            }
+            default -> reader.skipValue();
+        }
+    }
+
+    static class DefaultHttpTransport implements HttpTransport {
+        private final HttpClient client;
+
+        DefaultHttpTransport() {
+            this(HttpClient.newBuilder()
+                    .connectTimeout(CONNECT_TIMEOUT)
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .build());
+        }
+
+        DefaultHttpTransport(HttpClient client) {
+            this.client = Objects.requireNonNull(client, "client cannot be null");
+        }
 
         @Override
-        public TransportResponse send(URI uri, String method, Map<String, String> headers, Duration timeout)
-                throws IOException, InterruptedException {
+        public TransportResponse send(
+                URI uri,
+                String method,
+                Map<String, String> headers,
+                Duration timeout,
+                Cancellation cancellation
+        ) throws IOException, InterruptedException {
+            if (cancellation != null && cancellation.isCancelled()) {
+                throw new IOException("Request cancelled before send");
+            }
+
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(uri)
                     .timeout(timeout)
@@ -663,8 +858,42 @@ public class ReleaseClient {
                 }
             }
 
-            HttpResponse<InputStream> resp = client.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
-            return new TransportResponse(resp.statusCode(), resp.headers().map(), resp.body());
+            CompletableFuture<HttpResponse<InputStream>> future =
+                    client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream());
+
+            if (cancellation != null) {
+                cancellation.onCancel(() -> future.cancel(true));
+            }
+
+            HttpResponse<InputStream> resp;
+            try {
+                resp = future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException ex) {
+                future.cancel(true);
+                throw new IOException("HTTP request timed out after " + timeout, ex);
+            } catch (InterruptedException ex) {
+                future.cancel(true);
+                throw ex;
+            } catch (ExecutionException ex) {
+                Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                if (cause instanceof IOException ioEx) throw ioEx;
+                if (cause instanceof InterruptedException intEx) throw intEx;
+                throw new IOException("HTTP request failed: " + cause.getMessage(), cause);
+            } catch (CancellationException ex) {
+                throw new IOException("HTTP request cancelled", ex);
+            }
+
+            InputStream bodyStream = resp.body();
+            if (cancellation != null) {
+                cancellation.onCancel(() -> {
+                    try {
+                        bodyStream.close();
+                    } catch (IOException ignored) {
+                    }
+                });
+            }
+
+            return new TransportResponse(resp.statusCode(), resp.headers().map(), bodyStream);
         }
     }
 }

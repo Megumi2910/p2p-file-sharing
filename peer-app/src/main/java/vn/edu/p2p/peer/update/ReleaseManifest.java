@@ -3,11 +3,15 @@ package vn.edu.p2p.peer.update;
 import com.google.gson.Strictness;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
+import vn.edu.p2p.peer.util.HashUtil;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.util.HashSet;
@@ -76,6 +80,43 @@ public record ReleaseManifest(
         }
     }
 
+    public static void verifyJar(Path jar, ReleaseManifest manifest, PublicKey trustedKey) throws Exception {
+        Objects.requireNonNull(jar, "jar path cannot be null");
+        Objects.requireNonNull(manifest, "manifest cannot be null");
+
+        if (!Files.exists(jar)) {
+            throw new NoSuchFileException("JAR does not exist: " + jar);
+        }
+
+        long actualSize = Files.size(jar);
+        if (actualSize != manifest.size()) {
+            throw new SecurityException("JAR size mismatch: expected " + manifest.size() + " but got " + actualSize);
+        }
+
+        String computedSha256 = HashUtil.sha256(jar);
+        if (!computedSha256.equalsIgnoreCase(manifest.sha256())) {
+            throw new SecurityException("JAR SHA-256 mismatch: expected " + manifest.sha256() + " but computed " + computedSha256);
+        }
+
+        BuildInfo embedded = BuildInfo.readJar(jar);
+        if (embedded.isDevelopment() || embedded.version() == null) {
+            throw new SecurityException("Candidate JAR has development or invalid version");
+        }
+        if (!embedded.version().equals(manifest.version())) {
+            throw new SecurityException("Candidate JAR embedded version (" + embedded.version()
+                    + ") does not match manifest (" + manifest.version() + ")");
+        }
+        if (!BuildInfo.DEFAULT_REPOSITORY.equals(embedded.repository())) {
+            throw new SecurityException("Candidate JAR embedded repository mismatch: " + embedded.repository());
+        }
+        if (embedded.installerProtocol() != 1) {
+            throw new SecurityException("Candidate JAR unsupported installer protocol: " + embedded.installerProtocol());
+        }
+        if (trustedKey != null && !Objects.equals(trustedKey, embedded.publicKey())) {
+            throw new SecurityException("Candidate JAR embedded public key does not match trusted key");
+        }
+    }
+
     public static ReleaseManifest parseAndVerify(
             byte[] manifestBytes,
             byte[] signatureBytes,
@@ -127,12 +168,7 @@ public record ReleaseManifest(
                 throw new IllegalArgumentException("Duplicate field in manifest: " + name);
             }
             switch (name) {
-                case "schema" -> {
-                    if (reader.peek() != JsonToken.NUMBER) {
-                        throw new IllegalArgumentException("Field schema must be an integer");
-                    }
-                    schema = reader.nextInt();
-                }
+                case "schema" -> schema = parseStrictInt(reader, "schema");
                 case "repository" -> {
                     if (reader.peek() != JsonToken.STRING) {
                         throw new IllegalArgumentException("Field repository must be a string");
@@ -143,11 +179,7 @@ public record ReleaseManifest(
                     if (reader.peek() != JsonToken.STRING) {
                         throw new IllegalArgumentException("Field version must be a string");
                     }
-                    String rawVer = reader.nextString();
-                    if (rawVer.startsWith("v") || rawVer.startsWith("V")) {
-                        throw new IllegalArgumentException("Manifest version must not start with 'v': " + rawVer);
-                    }
-                    version = ClientVersion.parse(rawVer);
+                    version = ClientVersion.parse(reader.nextString());
                 }
                 case "artifact" -> {
                     if (reader.peek() != JsonToken.STRING) {
@@ -155,30 +187,15 @@ public record ReleaseManifest(
                     }
                     artifact = reader.nextString();
                 }
-                case "size" -> {
-                    if (reader.peek() != JsonToken.NUMBER) {
-                        throw new IllegalArgumentException("Field size must be a number");
-                    }
-                    size = reader.nextLong();
-                }
+                case "size" -> size = parseStrictLong(reader, "size");
                 case "sha256" -> {
                     if (reader.peek() != JsonToken.STRING) {
                         throw new IllegalArgumentException("Field sha256 must be a string");
                     }
                     sha256 = reader.nextString();
                 }
-                case "minJava" -> {
-                    if (reader.peek() != JsonToken.NUMBER) {
-                        throw new IllegalArgumentException("Field minJava must be an integer");
-                    }
-                    minJava = reader.nextInt();
-                }
-                case "installerProtocol" -> {
-                    if (reader.peek() != JsonToken.NUMBER) {
-                        throw new IllegalArgumentException("Field installerProtocol must be an integer");
-                    }
-                    installerProtocol = reader.nextInt();
-                }
+                case "minJava" -> minJava = parseStrictInt(reader, "minJava");
+                case "installerProtocol" -> installerProtocol = parseStrictInt(reader, "installerProtocol");
                 case "bundle" -> {
                     if (reader.peek() != JsonToken.BEGIN_OBJECT) {
                         throw new IllegalArgumentException("Field bundle must be an object");
@@ -225,12 +242,7 @@ public record ReleaseManifest(
                     }
                     name = reader.nextString();
                 }
-                case "size" -> {
-                    if (reader.peek() != JsonToken.NUMBER) {
-                        throw new IllegalArgumentException("bundle.size must be a number");
-                    }
-                    size = reader.nextLong();
-                }
+                case "size" -> size = parseStrictLong(reader, "bundle.size");
                 case "sha256" -> {
                     if (reader.peek() != JsonToken.STRING) {
                         throw new IllegalArgumentException("bundle.sha256 must be a string");
@@ -247,6 +259,56 @@ public record ReleaseManifest(
         }
 
         return new BundleInfo(name, size, sha256);
+    }
+
+    static int parseStrictInt(JsonReader reader, String fieldName) throws IOException {
+        if (reader.peek() != JsonToken.NUMBER) {
+            throw new IllegalArgumentException("Field " + fieldName + " must be an integer, got: " + reader.peek());
+        }
+        String s = reader.nextString();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                throw new IllegalArgumentException("Field " + fieldName + " must be a decimal integer without fractions or exponents: " + s);
+            }
+        }
+        if (s.length() > 1 && s.startsWith("0")) {
+            throw new IllegalArgumentException("Leading zeros not allowed in integer field " + fieldName + ": " + s);
+        }
+        try {
+            long val = Long.parseLong(s);
+            if (val < 0 || val > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Field " + fieldName + " out of integer range: " + s);
+            }
+            return (int) val;
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException("Field " + fieldName + " cannot be parsed as int: " + s, ex);
+        }
+    }
+
+    static long parseStrictLong(JsonReader reader, String fieldName) throws IOException {
+        if (reader.peek() != JsonToken.NUMBER) {
+            throw new IllegalArgumentException("Field " + fieldName + " must be a number, got: " + reader.peek());
+        }
+        String s = reader.nextString();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                throw new IllegalArgumentException("Field " + fieldName + " must be a decimal integer without fractions or exponents: " + s);
+            }
+        }
+        if (s.length() > 1 && s.startsWith("0")) {
+            throw new IllegalArgumentException("Leading zeros not allowed in number field " + fieldName + ": " + s);
+        }
+        try {
+            long val = Long.parseLong(s);
+            if (val < 0) {
+                throw new IllegalArgumentException("Field " + fieldName + " must be non-negative: " + s);
+            }
+            return val;
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException("Field " + fieldName + " cannot be parsed as long: " + s, ex);
+        }
     }
 
     public String toJson() {

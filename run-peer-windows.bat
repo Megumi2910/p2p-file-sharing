@@ -1,16 +1,21 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal DisableDelayedExpansion
 
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "SCRIPT_DIR=%~dp0."
 
-:: Check if peer-app.jar is missing but an interrupted update exists
+:: Prioritize missing canonical peer-app.jar + existing journal recovery over developer JAR fallback
 if not exist "%SCRIPT_DIR%\peer-app.jar" (
-    if not exist "%SCRIPT_DIR%\peer-app\target\peer-app.jar" (
-        if exist "%SCRIPT_DIR%\.p2p-update\helper.jar" (
-            if exist "%SCRIPT_DIR%\.p2p-update\transaction.properties" (
-                echo Interrupted update detected. Running recovery...
-                java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -cp "%SCRIPT_DIR%\.p2p-update\helper.jar" vn.edu.p2p.peer.update.UpdateInstaller --recover "%SCRIPT_DIR%"
+    if exist "%SCRIPT_DIR%\.p2p-update\helper.jar" (
+        if exist "%SCRIPT_DIR%\.p2p-update\transaction.properties" (
+            echo Interrupted update detected. Running recovery...
+            java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -cp "%SCRIPT_DIR%\.p2p-update\helper.jar" vn.edu.p2p.peer.update.UpdateInstaller --recover "%SCRIPT_DIR%"
+            if errorlevel 1 (
+                echo Error: Recovery failed with non-zero exit code. >&2
+                exit /b 1
+            )
+            if not exist "%SCRIPT_DIR%\peer-app.jar" (
+                echo Error: Recovery did not restore canonical peer-app.jar. >&2
+                exit /b 1
             )
         )
     )
@@ -43,4 +48,5 @@ if not exist "%CONFIG%" (
 
 echo Launching: java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -jar "%JAR%" "%CONFIG%"
 java -Djava.awt.headless=false -Dfile.encoding=UTF-8 -jar "%JAR%" "%CONFIG%"
-endlocal
+set "EXITCODE=%ERRORLEVEL%"
+exit /b %EXITCODE%

@@ -3,6 +3,7 @@ package vn.edu.p2p.peer.update;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -19,26 +20,38 @@ public final class UpdateLocks {
 
     private UpdateLocks() {}
 
+    private static void checkUpdateDir(Path updateDir) throws IOException {
+        Objects.requireNonNull(updateDir, "updateDir cannot be null");
+        if (!Files.isDirectory(updateDir)) {
+            throw new IOException("Update directory does not exist or is not a directory: " + updateDir);
+        }
+        if (Files.isSymbolicLink(updateDir)) {
+            throw new SecurityException("Update directory cannot be a symbolic link: " + updateDir);
+        }
+    }
+
     public static FileLockHandle acquireSharedRuntimeLock(Path updateDir) throws IOException {
-        Files.createDirectories(updateDir);
+        checkUpdateDir(updateDir);
         Path lockPath = updateDir.resolve(RUNTIME_LOCK);
         FileChannel channel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE);
         try {
-            // Shared lock on entire file
             FileLock lock = channel.lock(0, Long.MAX_VALUE, true);
             return new FileLockHandle(channel, lock);
         } catch (Exception ex) {
-            channel.close();
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+            }
             throw ex;
         }
     }
 
     public static FileLockHandle acquireExclusiveRuntimeLock(Path updateDir, Duration timeout)
             throws IOException, InterruptedException {
-        Files.createDirectories(updateDir);
+        checkUpdateDir(updateDir);
         Path lockPath = updateDir.resolve(RUNTIME_LOCK);
         FileChannel channel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
@@ -48,7 +61,12 @@ public final class UpdateLocks {
         long deadline = System.nanoTime() + timeout.toNanos();
         try {
             while (true) {
-                FileLock lock = channel.tryLock(0, Long.MAX_VALUE, false);
+                FileLock lock = null;
+                try {
+                    lock = channel.tryLock(0, Long.MAX_VALUE, false);
+                } catch (OverlappingFileLockException ex) {
+                    lock = null;
+                }
                 if (lock != null) {
                     return new FileLockHandle(channel, lock);
                 }
@@ -58,34 +76,45 @@ public final class UpdateLocks {
                 Thread.sleep(100);
             }
         } catch (Exception ex) {
-            channel.close();
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+            }
             throw ex;
         }
     }
 
     public static FileLockHandle tryAcquireOperationLock(Path updateDir) throws IOException {
-        Files.createDirectories(updateDir);
+        checkUpdateDir(updateDir);
         Path lockPath = updateDir.resolve(OPERATION_LOCK);
         FileChannel channel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE);
         try {
-            FileLock lock = channel.tryLock(0, Long.MAX_VALUE, false);
+            FileLock lock = null;
+            try {
+                lock = channel.tryLock(0, Long.MAX_VALUE, false);
+            } catch (OverlappingFileLockException ex) {
+                lock = null;
+            }
             if (lock == null) {
                 channel.close();
                 return null;
             }
             return new FileLockHandle(channel, lock);
         } catch (Exception ex) {
-            channel.close();
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+            }
             throw ex;
         }
     }
 
     public static FileLockHandle acquireOperationLock(Path updateDir, Duration timeout)
             throws IOException, InterruptedException {
-        Files.createDirectories(updateDir);
+        checkUpdateDir(updateDir);
         Path lockPath = updateDir.resolve(OPERATION_LOCK);
         FileChannel channel = FileChannel.open(lockPath,
                 StandardOpenOption.CREATE,
@@ -95,7 +124,12 @@ public final class UpdateLocks {
         long deadline = System.nanoTime() + timeout.toNanos();
         try {
             while (true) {
-                FileLock lock = channel.tryLock(0, Long.MAX_VALUE, false);
+                FileLock lock = null;
+                try {
+                    lock = channel.tryLock(0, Long.MAX_VALUE, false);
+                } catch (OverlappingFileLockException ex) {
+                    lock = null;
+                }
                 if (lock != null) {
                     return new FileLockHandle(channel, lock);
                 }
@@ -105,18 +139,29 @@ public final class UpdateLocks {
                 Thread.sleep(100);
             }
         } catch (Exception ex) {
-            channel.close();
+            try {
+                channel.close();
+            } catch (IOException ignored) {
+            }
             throw ex;
         }
     }
 
     public static boolean isOperationActive(Path updateDir) {
+        if (updateDir == null || !Files.isDirectory(updateDir)) {
+            return false;
+        }
         Path lockPath = updateDir.resolve(OPERATION_LOCK);
         if (!Files.exists(lockPath)) {
             return false;
         }
         try (FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            FileLock lock = channel.tryLock(0, Long.MAX_VALUE, false);
+            FileLock lock;
+            try {
+                lock = channel.tryLock(0, Long.MAX_VALUE, false);
+            } catch (OverlappingFileLockException ex) {
+                return true;
+            }
             if (lock == null) {
                 return true;
             }
@@ -146,26 +191,28 @@ public final class UpdateLocks {
     public static class FileLockHandle implements AutoCloseable {
         private final FileChannel channel;
         private final FileLock lock;
-        private boolean closed = false;
 
         public FileLockHandle(FileChannel channel, FileLock lock) {
-            this.channel = Objects.requireNonNull(channel);
-            this.lock = Objects.requireNonNull(lock);
+            this.channel = Objects.requireNonNull(channel, "channel cannot be null");
+            this.lock = Objects.requireNonNull(lock, "lock cannot be null");
         }
 
         public FileLock lock() {
             return lock;
         }
 
+        public FileChannel channel() {
+            return channel;
+        }
+
         @Override
-        public synchronized void close() throws IOException {
-            if (!closed) {
-                closed = true;
-                try {
-                    if (lock.isValid()) {
-                        lock.release();
-                    }
-                } finally {
+        public void close() throws IOException {
+            try {
+                if (lock.isValid()) {
+                    lock.release();
+                }
+            } finally {
+                if (channel.isOpen()) {
                     channel.close();
                 }
             }

@@ -175,6 +175,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           TAG="v$VERSION"
+          gh release delete "$TAG" --yes --repo "$REPO" 2>/dev/null || true
           gh release create "$TAG" \
             artifacts/peer-app.jar \
             "artifacts/p2p-client-$VERSION.zip" \
@@ -197,15 +198,15 @@ jobs:
           TAG="v$VERSION"
           mkdir -p /tmp/readback /tmp/downloaded
 
-          gh api "/repos/$REPO/releases/tags/$TAG" > /tmp/readback/draft.json
+          gh release view "$TAG" --repo "$REPO" --json isDraft,tagName,assets > /tmp/readback/draft.json
 
-          IS_DRAFT=$(jq -r '.draft' /tmp/readback/draft.json)
+          IS_DRAFT=$(jq -r '.isDraft' /tmp/readback/draft.json)
           if [ "$IS_DRAFT" != "true" ]; then
             echo "Error: Created release is not marked draft" >&2
             exit 1
           fi
 
-          READBACK_TAG=$(jq -r '.tag_name' /tmp/readback/draft.json)
+          READBACK_TAG=$(jq -r '.tagName' /tmp/readback/draft.json)
           if [ "$READBACK_TAG" != "$TAG" ]; then
             echo "Error: Tag name mismatch in draft: expected $TAG but got $READBACK_TAG" >&2
             exit 1

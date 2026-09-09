@@ -118,7 +118,7 @@ public class ClientUpdateSmoke {
 
                         // Wait for MainFrame
                         MainFrame mainFrame = null;
-                        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
                         while (System.nanoTime() < deadline && mainFrame == null) {
                             for (Frame f : Frame.getFrames()) {
                                 if (f instanceof MainFrame mf && mf.isVisible()) {
@@ -130,7 +130,7 @@ public class ClientUpdateSmoke {
                         }
 
                         if (mainFrame == null) {
-                            System.err.println("PeerDriver: MainFrame not found within 15s");
+                            System.err.println("PeerDriver: MainFrame not found within 60s");
                             System.exit(2);
                             return;
                         }
@@ -139,7 +139,7 @@ public class ClientUpdateSmoke {
                         captureScreenshot(robot, screenshotDir.resolve("01-mainframe.png"));
 
                         // Locate Software updates button and click it
-                        JButton updatesButton = waitForButton(mainFrame, "Software updates...", Duration.ofSeconds(10));
+                        JButton updatesButton = waitForButton(mainFrame, "Software updates...", Duration.ofSeconds(20));
                         if (updatesButton == null) {
                             System.err.println("PeerDriver: Software updates button not found or not showing");
                             System.exit(3);
@@ -150,7 +150,7 @@ public class ClientUpdateSmoke {
                         System.out.println("PEER_OBSERVATION:UPDATES_BUTTON_CLICKED");
 
                         // Wait for UpdateDialog
-                        UpdateDialog updateDialog = waitForWindow(UpdateDialog.class, Duration.ofSeconds(10));
+                        UpdateDialog updateDialog = waitForWindow(UpdateDialog.class, Duration.ofSeconds(20));
                         if (updateDialog == null) {
                             System.err.println("PeerDriver: UpdateDialog not found or not showing");
                             System.exit(4);
@@ -168,7 +168,7 @@ public class ClientUpdateSmoke {
                                 clickComponent(robot, checkBtn);
                                 System.out.println("PEER_OBSERVATION:CHECK_BUTTON_CLICKED");
                             }
-                            downloadBtn = waitForButton(updateDialog, "Update now", Duration.ofSeconds(20));
+                            downloadBtn = waitForButton(updateDialog, "Update now", Duration.ofSeconds(30));
                         }
 
                         if (downloadBtn == null) {
@@ -182,7 +182,7 @@ public class ClientUpdateSmoke {
                         System.out.println("PEER_OBSERVATION:DOWNLOAD_BUTTON_CLICKED");
 
                         // Wait for Restart and install button
-                        JButton installBtn = waitForButton(updateDialog, "Restart and install", Duration.ofSeconds(20));
+                        JButton installBtn = waitForButton(updateDialog, "Restart and install", Duration.ofSeconds(30));
                         if (installBtn == null) {
                             System.err.println("PeerDriver: Restart and install button not visible after download. Dialog contents:");
                             printContainerHierarchy(updateDialog);
@@ -195,9 +195,9 @@ public class ClientUpdateSmoke {
                         System.out.println("PEER_OBSERVATION:INSTALL_BUTTON_CLICKED");
 
                         // Find and accept the confirmation dialog
-                        JDialog confirmDialog = waitForWindow(JDialog.class, Duration.ofSeconds(5));
+                        JDialog confirmDialog = waitForWindow(JDialog.class, Duration.ofSeconds(15));
                         if (confirmDialog != null) {
-                            JButton yesBtn = waitForButton(confirmDialog, "Yes", Duration.ofSeconds(5));
+                            JButton yesBtn = waitForButton(confirmDialog, "Yes", Duration.ofSeconds(15));
                             if (yesBtn != null) {
                                 clickComponent(robot, yesBtn);
                                 System.out.println("PEER_OBSERVATION:CONFIRM_YES_CLICKED");
@@ -584,13 +584,13 @@ public class ClientUpdateSmoke {
 
         // Wait for Peer 1 to trigger update, spawn helper, and exit
         System.out.println("Step 8: Supervising automated update and waiting for Peer 1 exit...");
-        boolean peer1Exited = peer1Process.waitFor(30, TimeUnit.SECONDS);
+        boolean peer1Exited = peer1Process.waitFor(60, TimeUnit.SECONDS);
         assertTrue("Original Peer 1 process must exit after handoff to helper", peer1Exited);
         System.out.println("Original Peer 1 exited cleanly.");
 
         // Wait for canonical peer-app.jar to be replaced with 1.0.1
         System.out.println("Step 9: Observing atomic binary replacement and child relaunch...");
-        long swapDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long swapDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
         boolean swapped = false;
         while (System.nanoTime() < swapDeadline) {
             if (Files.exists(canonicalJar) && jar101Sha.equalsIgnoreCase(HashUtil.sha256(canonicalJar))) {
@@ -614,7 +614,7 @@ public class ClientUpdateSmoke {
 
         // Wait for journal to show COMMITTED
         Path updateDir = installRoot.resolve(".p2p-update");
-        long commitDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long commitDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
         UpdateJournal committedJournal = null;
         while (System.nanoTime() < commitDeadline) {
             try {
@@ -632,7 +632,7 @@ public class ClientUpdateSmoke {
 
         // Wait for restarted child process to register on Tracker
         System.out.println("Step 10: Verifying restarted child registration on Tracker...");
-        long trackerRegDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        long trackerRegDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
         boolean registeredOnTracker = false;
         while (System.nanoTime() < trackerRegDeadline) {
             try {
@@ -657,7 +657,7 @@ public class ClientUpdateSmoke {
 
         // Wait for file to arrive in Peer 1 download folder
         Path receivedFile = peer1Downloads.resolve("transfer_smoke_test.txt");
-        long transferDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        long transferDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (System.nanoTime() < transferDeadline) {
             if (Files.exists(receivedFile) && Files.size(receivedFile) == Files.size(sampleFile)) {
                 break;

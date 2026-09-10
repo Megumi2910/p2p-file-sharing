@@ -316,7 +316,9 @@ public final class ChunkVisualizerPanel extends JPanel {
             add(swatch);
 
             JLabel label = new JLabel(labelText);
-            label.setFont(UIManager.getFont("Label.font").deriveFont(11f));
+            Font baseFont = UIManager.getFont("Label.font");
+            float fontSize = baseFont != null ? Math.max(11f, baseFont.getSize2D() - 2f) : 11f;
+            label.setFont((baseFont != null ? baseFont : label.getFont()).deriveFont(fontSize));
             label.putClientProperty("html.disable", Boolean.TRUE);
             add(label);
         }

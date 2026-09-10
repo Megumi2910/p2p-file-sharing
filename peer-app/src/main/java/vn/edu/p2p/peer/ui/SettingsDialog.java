@@ -25,6 +25,7 @@ import javax.swing.JTextField;
 import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.UIManager;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -282,7 +283,9 @@ public class SettingsDialog extends JDialog {
             repairLabel.putClientProperty("html.disable", Boolean.TRUE);
 
             syntaxTextArea = new JTextArea(syntaxException != null ? syntaxException.sourceText() : "");
-            syntaxTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+            Font taFont = UIManager.getFont("TextArea.font");
+            int monoSize = taFont != null ? Math.max(12, Math.round(taFont.getSize2D())) : 12;
+            syntaxTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, monoSize));
             syntaxTextArea.setTabSize(4);
             syntaxTextArea.setCaretPosition(0);
             JScrollPane scrollPane = new JScrollPane(syntaxTextArea);

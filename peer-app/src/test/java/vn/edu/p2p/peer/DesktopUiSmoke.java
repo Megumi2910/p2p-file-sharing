@@ -600,6 +600,10 @@ public class DesktopUiSmoke {
             robot.waitForIdle();
             Thread.sleep(150);
             if (!advPanel.isVisible()) {
+                SwingUtilities.invokeAndWait(toggleAdv::doClick);
+                robot.waitForIdle();
+            }
+            if (!advPanel.isVisible()) {
                 throw new AssertionError("Advanced panel must be visible after clicking toggle button");
             }
 
@@ -756,6 +760,7 @@ public class DesktopUiSmoke {
                 w.toFront();
                 w.requestFocus();
             }
+            comp.scrollRectToVisible(new Rectangle(0, 0, Math.max(1, comp.getWidth()), Math.max(1, comp.getHeight())));
             comp.requestFocusInWindow();
         });
         Thread.sleep(60);

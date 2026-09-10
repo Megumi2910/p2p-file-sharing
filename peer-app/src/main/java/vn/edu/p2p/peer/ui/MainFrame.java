@@ -548,20 +548,39 @@ public final class MainFrame extends JFrame implements TransferListener {
         JPanel panel = new JPanel(new BorderLayout(0, 8));
 
         // Top search bar
-        JPanel topBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        JPanel topBar = new JPanel(new GridBagLayout());
+        topBar.setBorder(BorderFactory.createEmptyBorder(0, 0, UIScale.scale(4), 0));
+        GridBagConstraints sgbc = new GridBagConstraints();
+        sgbc.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(2), UIScale.scale(4));
+
         JLabel kwLabel = new JLabel("Keyword:");
         kwLabel.setLabelFor(searchField);
         kwLabel.putClientProperty("html.disable", Boolean.TRUE);
+        sgbc.gridx = 0;
+        sgbc.gridy = 0;
+        sgbc.weightx = 0.0;
+        sgbc.fill = GridBagConstraints.NONE;
+        topBar.add(kwLabel, sgbc);
 
         searchField.putClientProperty("html.disable", Boolean.TRUE);
+        sgbc.gridx = 1;
+        sgbc.weightx = 1.0;
+        sgbc.fill = GridBagConstraints.HORIZONTAL;
+        topBar.add(searchField, sgbc);
+
         searchButton.putClientProperty("html.disable", Boolean.TRUE);
+        sgbc.gridx = 2;
+        sgbc.weightx = 0.0;
+        sgbc.fill = GridBagConstraints.NONE;
+        topBar.add(searchButton, sgbc);
+
         downloadButton.putClientProperty("html.disable", Boolean.TRUE);
         downloadButton.putClientProperty("FlatLaf.styleClass", "primary");
+        sgbc.gridx = 3;
+        sgbc.weightx = 0.0;
+        sgbc.fill = GridBagConstraints.NONE;
+        topBar.add(downloadButton, sgbc);
 
-        topBar.add(kwLabel);
-        topBar.add(searchField);
-        topBar.add(searchButton);
-        topBar.add(downloadButton);
         panel.add(topBar, BorderLayout.NORTH);
 
         searchTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);

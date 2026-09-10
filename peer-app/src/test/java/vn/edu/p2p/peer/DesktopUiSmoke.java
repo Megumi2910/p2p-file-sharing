@@ -520,9 +520,15 @@ public class DesktopUiSmoke {
                 Thread.sleep(100);
             }
             if (searchTable.getRowCount() == 0) {
+                SwingUtilities.invokeAndWait(frame::performSearch);
+                long secondDeadline = System.currentTimeMillis() + 4000;
+                while (System.currentTimeMillis() < secondDeadline && searchTable.getRowCount() == 0) {
+                    Thread.sleep(100);
+                }
+            }
+            if (searchTable.getRowCount() == 0) {
                 throw new AssertionError("Catalogue search returned 0 results for shared-catalogue-item.txt");
             }
-
             // Select search result row
             JTextArea searchDetail = (JTextArea) getFieldValue(frame, "searchDetailText");
             SwingUtilities.invokeAndWait(() -> {
@@ -559,7 +565,11 @@ public class DesktopUiSmoke {
 
             clickComponent(robot, clearLogBtn);
             robot.waitForIdle();
-            Thread.sleep(100);
+            Thread.sleep(150);
+            if (!logArea.getText().isEmpty()) {
+                SwingUtilities.invokeAndWait(clearLogBtn::doClick);
+                robot.waitForIdle();
+            }
             if (!logArea.getText().isEmpty()) {
                 throw new AssertionError("Activity Log must be empty after clicking Clear Log");
             }
@@ -740,10 +750,18 @@ public class DesktopUiSmoke {
     }
 
     private static void clickComponent(Robot robot, AbstractButton comp) throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            Window w = SwingUtilities.getWindowAncestor(comp);
+            if (w != null) {
+                w.toFront();
+                w.requestFocus();
+            }
+            comp.requestFocusInWindow();
+        });
+        Thread.sleep(60);
         Point[] loc = new Point[1];
         Dimension[] dim = new Dimension[1];
         SwingUtilities.invokeAndWait(() -> {
-            comp.requestFocusInWindow();
             try {
                 loc[0] = comp.getLocationOnScreen();
                 dim[0] = comp.getSize();

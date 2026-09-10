@@ -1,4 +1,5 @@
 package vn.edu.p2p.peer.ui;
+import com.formdev.flatlaf.util.UIScale;
 
 import vn.edu.p2p.common.protocol.TransferProtocol;
 import vn.edu.p2p.peer.PeerRuntime;
@@ -36,6 +37,7 @@ import java.awt.Font;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Rectangle;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
@@ -53,6 +55,42 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SettingsDialog extends JDialog {
+
+    private static JTextArea createWrappingPreviewArea() {
+        JTextArea area = new JTextArea();
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.putClientProperty("FlatLaf.styleClass", "muted");
+        area.putClientProperty("html.disable", Boolean.TRUE);
+        return area;
+    }
+
+    private static JTextArea createWrappingBannerArea() {
+        JTextArea area = new JTextArea();
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(true);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.putClientProperty("html.disable", Boolean.TRUE);
+        area.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+        area.setVisible(false);
+        return area;
+    }
+
+    private static JTextArea createWrappingLabel(String text) {
+        JTextArea area = new JTextArea(text);
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.putClientProperty("html.disable", Boolean.TRUE);
+        return area;
+    }
 
     public enum Mode {
         BOOTSTRAP,
@@ -76,9 +114,9 @@ public class SettingsDialog extends JDialog {
     private final JTextField trackerHostField = new JTextField(20);
     private final JTextField trackerPortField = new JTextField(8);
     private final JTextField downloadDirField = new JTextField(24);
-    private final JLabel downloadDirPreview = new JLabel();
+    private final JTextArea downloadDirPreview = createWrappingPreviewArea();
     private final JTextField sharedDirField = new JTextField(24);
-    private final JLabel sharedDirPreview = new JLabel();
+    private final JTextArea sharedDirPreview = createWrappingPreviewArea();
     private final JCheckBox autoAcceptBox = new JCheckBox("Automatically accept incoming transfers");
     private final JCheckBox checkOnStartupBox = new JCheckBox("Check for updates on startup");
 
@@ -99,7 +137,7 @@ public class SettingsDialog extends JDialog {
     private JTextArea syntaxTextArea;
 
     // Status / Error banner
-    private final JLabel statusBanner = new JLabel();
+    private final JTextArea statusBanner = createWrappingBannerArea();
     private final JButton saveButton;
     private final JButton restartButton = new JButton("Restart now");
     private final JButton reloadButton = new JButton("Reload from disk");
@@ -207,9 +245,6 @@ public class SettingsDialog extends JDialog {
 
     private void init() {
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setMinimumSize(new Dimension(600, 480));
-        setPreferredSize(new Dimension(680, 600));
-
         if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR && syntaxException != null) {
             this.currentSnapshot = syntaxException.snapshot();
         } else {
@@ -264,200 +299,212 @@ public class SettingsDialog extends JDialog {
                 dispose();
             }
         });
-
-        pack();
+        DesktopLayout.fitWindow(this, new Dimension(680, 600), new Dimension(600, 480));
         setLocationRelativeTo(getOwner());
     }
 
     private void buildUi() {
-        JPanel content = new JPanel(new BorderLayout(8, 8));
-        content.setBorder(BorderFactory.createEmptyBorder(12, 16, 12, 16));
-
-        statusBanner.setVisible(false);
-        statusBanner.putClientProperty("html.disable", Boolean.TRUE);
-        statusBanner.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
-        statusBanner.setOpaque(true);
+        JPanel content = new JPanel(new BorderLayout(0, UIScale.scale(8)));
+        content.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(12), UIScale.scale(16), UIScale.scale(12), UIScale.scale(16)
+        ));
 
         if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR) {
-            JLabel repairLabel = new JLabel("Configuration syntax error. Please repair the properties source below and click 'Save and start':");
-            repairLabel.putClientProperty("html.disable", Boolean.TRUE);
+            JTextArea repairLabel = createWrappingLabel(
+                    "Configuration syntax error. Please repair the properties source below and click '" + saveButton.getText() + "':"
+            );
 
             syntaxTextArea = new JTextArea(syntaxException != null ? syntaxException.sourceText() : "");
-            Font taFont = UIManager.getFont("TextArea.font");
-            int monoSize = taFont != null ? Math.max(12, Math.round(taFont.getSize2D())) : 12;
-            syntaxTextArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, monoSize));
+            syntaxTextArea.putClientProperty("FlatLaf.styleClass", "monospaced");
             syntaxTextArea.setTabSize(4);
             syntaxTextArea.setCaretPosition(0);
             JScrollPane scrollPane = new JScrollPane(syntaxTextArea);
 
-            JPanel buttonBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
-            saveButton.addActionListener(e -> onSave());
-            closeButton.addActionListener(e -> dispose());
-            reloadButton.setVisible(false);
-            reloadButton.addActionListener(e -> onReload());
-
-            buttonBar.add(reloadButton);
-            buttonBar.add(saveButton);
-            buttonBar.add(closeButton);
-
-            JPanel topWrapper = new JPanel(new BorderLayout(4, 4));
+            JPanel topWrapper = new JPanel(new BorderLayout(0, UIScale.scale(4)));
             topWrapper.add(statusBanner, BorderLayout.NORTH);
             topWrapper.add(repairLabel, BorderLayout.SOUTH);
 
             content.add(topWrapper, BorderLayout.NORTH);
             content.add(scrollPane, BorderLayout.CENTER);
-            content.add(buttonBar, BorderLayout.SOUTH);
+            content.add(buildFooterPanel(), BorderLayout.SOUTH);
             setContentPane(content);
             return;
         }
 
         JPanel mainForm = new JPanel(new GridBagLayout());
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(4, 4, 4, 4);
+        mainForm.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(4), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4)
+        ));
 
         int row = 0;
 
         // Configuration Path (readonly)
         configPathField.setEditable(false);
         configPathField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(mainForm, gbc, row++, "Config File:", configPathField, null);
+        addFormRow(mainForm, row++, "Config File:", configPathField, null);
 
         // Peer ID
         peerIdField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(mainForm, gbc, row++, "Peer ID:", peerIdField, "(unique identity)");
+        addFormRow(mainForm, row++, "Peer ID:", peerIdField, "(unique identity)");
 
         // Display Name
         displayNameField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(mainForm, gbc, row++, "Display Name:", displayNameField, null);
+        addFormRow(mainForm, row++, "Display Name:", displayNameField, null);
 
         // Listen Port
         peerPortField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(mainForm, gbc, row++, "Listen Port:", peerPortField, "(1-65535)");
+        addFormRow(mainForm, row++, "Listen Port:", peerPortField, "(1-65535)");
 
         // Tracker Host & Port
-        JPanel trackerPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JPanel trackerPanel = new JPanel(new GridBagLayout());
+        trackerPanel.setOpaque(false);
         trackerHostField.putClientProperty("html.disable", Boolean.TRUE);
         trackerPortField.putClientProperty("html.disable", Boolean.TRUE);
-        trackerPanel.add(trackerHostField);
-        trackerPanel.add(new JLabel(":"));
-        trackerPanel.add(trackerPortField);
-        addFormRow(mainForm, gbc, row++, "Tracker Address:", trackerPanel, null);
+        trackerPortField.setColumns(6);
+
+        GridBagConstraints tgbc1 = new GridBagConstraints();
+        tgbc1.gridx = 0;
+        tgbc1.gridy = 0;
+        tgbc1.weightx = 1.0;
+        tgbc1.fill = GridBagConstraints.HORIZONTAL;
+        tgbc1.insets = new Insets(0, 0, 0, UIScale.scale(4));
+        trackerPanel.add(trackerHostField, tgbc1);
+
+        JLabel colonLabel = new JLabel(":");
+        colonLabel.putClientProperty("html.disable", Boolean.TRUE);
+        GridBagConstraints tgbc2 = new GridBagConstraints();
+        tgbc2.gridx = 1;
+        tgbc2.gridy = 0;
+        tgbc2.weightx = 0.0;
+        tgbc2.fill = GridBagConstraints.NONE;
+        tgbc2.insets = new Insets(0, 0, 0, UIScale.scale(4));
+        trackerPanel.add(colonLabel, tgbc2);
+
+        GridBagConstraints tgbc3 = new GridBagConstraints();
+        tgbc3.gridx = 2;
+        tgbc3.gridy = 0;
+        tgbc3.weightx = 0.0;
+        tgbc3.fill = GridBagConstraints.NONE;
+        trackerPanel.add(trackerPortField, tgbc3);
+
+        addFormRow(mainForm, row++, "Tracker Address:", trackerPanel, null);
 
         // Download Directory + Browse
-        JPanel downloadPanel = new JPanel(new BorderLayout(4, 0));
+        JPanel downloadPanel = new JPanel(new BorderLayout(UIScale.scale(4), 0));
+        downloadPanel.setOpaque(false);
         downloadDirField.putClientProperty("html.disable", Boolean.TRUE);
         JButton browseDownloadBtn = new JButton("Browse...");
         browseDownloadBtn.addActionListener(e -> browseDirectory(downloadDirField));
         downloadPanel.add(downloadDirField, BorderLayout.CENTER);
         downloadPanel.add(browseDownloadBtn, BorderLayout.EAST);
         downloadDirField.getDocument().addDocumentListener(new SimpleDocumentListener(this::updatePathPreviews));
-        downloadDirPreview.putClientProperty("html.disable", Boolean.TRUE);
-        downloadDirPreview.setForeground(Color.GRAY);
 
-        JPanel downloadWrapper = new JPanel(new BorderLayout(2, 2));
+        JPanel downloadWrapper = new JPanel(new BorderLayout(0, UIScale.scale(2)));
+        downloadWrapper.setOpaque(false);
         downloadWrapper.add(downloadPanel, BorderLayout.NORTH);
         downloadWrapper.add(downloadDirPreview, BorderLayout.SOUTH);
-        addFormRow(mainForm, gbc, row++, "Download Folder:", downloadWrapper, null);
+        addFormRow(mainForm, row++, "Download Folder:", downloadWrapper, null);
 
         // Shared Directory + Browse
-        JPanel sharedPanel = new JPanel(new BorderLayout(4, 0));
+        JPanel sharedPanel = new JPanel(new BorderLayout(UIScale.scale(4), 0));
+        sharedPanel.setOpaque(false);
         sharedDirField.putClientProperty("html.disable", Boolean.TRUE);
         JButton browseSharedBtn = new JButton("Browse...");
         browseSharedBtn.addActionListener(e -> browseDirectory(sharedDirField));
         sharedPanel.add(sharedDirField, BorderLayout.CENTER);
         sharedPanel.add(browseSharedBtn, BorderLayout.EAST);
         sharedDirField.getDocument().addDocumentListener(new SimpleDocumentListener(this::updatePathPreviews));
-        sharedDirPreview.putClientProperty("html.disable", Boolean.TRUE);
-        sharedDirPreview.setForeground(Color.GRAY);
 
-        JPanel sharedWrapper = new JPanel(new BorderLayout(2, 2));
+        JPanel sharedWrapper = new JPanel(new BorderLayout(0, UIScale.scale(2)));
+        sharedWrapper.setOpaque(false);
         sharedWrapper.add(sharedPanel, BorderLayout.NORTH);
         sharedWrapper.add(sharedDirPreview, BorderLayout.SOUTH);
-        addFormRow(mainForm, gbc, row++, "Shared Folder:", sharedWrapper, null);
+        addFormRow(mainForm, row++, "Shared Folder:", sharedWrapper, null);
 
         // Checkboxes
         autoAcceptBox.putClientProperty("html.disable", Boolean.TRUE);
         checkOnStartupBox.putClientProperty("html.disable", Boolean.TRUE);
-        gbc.gridx = 1;
-        gbc.gridy = row++;
-        gbc.weightx = 1.0;
-        mainForm.add(autoAcceptBox, gbc);
 
-        gbc.gridy = row++;
-        mainForm.add(checkOnStartupBox, gbc);
+        GridBagConstraints cbgc1 = new GridBagConstraints();
+        cbgc1.gridx = 1;
+        cbgc1.gridy = row++;
+        cbgc1.weightx = 1.0;
+        cbgc1.anchor = GridBagConstraints.WEST;
+        cbgc1.fill = GridBagConstraints.HORIZONTAL;
+        cbgc1.insets = new Insets(UIScale.scale(4), UIScale.scale(4), UIScale.scale(2), UIScale.scale(4));
+        mainForm.add(autoAcceptBox, cbgc1);
+
+        GridBagConstraints cbgc2 = new GridBagConstraints();
+        cbgc2.gridx = 1;
+        cbgc2.gridy = row++;
+        cbgc2.weightx = 1.0;
+        cbgc2.anchor = GridBagConstraints.WEST;
+        cbgc2.fill = GridBagConstraints.HORIZONTAL;
+        cbgc2.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
+        mainForm.add(checkOnStartupBox, cbgc2);
 
         // Advanced collapsible section
         buildAdvancedPanel();
         toggleAdvancedBtn.addActionListener(e -> toggleAdvancedSection());
-        gbc.gridx = 0;
-        gbc.gridy = row++;
-        gbc.gridwidth = 2;
-        mainForm.add(toggleAdvancedBtn, gbc);
 
-        gbc.gridy = row++;
+        GridBagConstraints tgbc = new GridBagConstraints();
+        tgbc.gridx = 0;
+        tgbc.gridy = row++;
+        tgbc.gridwidth = 2;
+        tgbc.weightx = 1.0;
+        tgbc.anchor = GridBagConstraints.WEST;
+        tgbc.fill = GridBagConstraints.HORIZONTAL;
+        tgbc.insets = new Insets(UIScale.scale(8), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
+        mainForm.add(toggleAdvancedBtn, tgbc);
+
+        GridBagConstraints agbc = new GridBagConstraints();
+        agbc.gridx = 0;
+        agbc.gridy = row++;
+        agbc.gridwidth = 2;
+        agbc.weightx = 1.0;
+        agbc.anchor = GridBagConstraints.WEST;
+        agbc.fill = GridBagConstraints.HORIZONTAL;
+        agbc.insets = new Insets(UIScale.scale(4), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
         advancedPanel.setVisible(false);
-        mainForm.add(advancedPanel, gbc);
+        mainForm.add(advancedPanel, agbc);
 
         JScrollPane scrollPane = new JScrollPane(mainForm);
         scrollPane.setBorder(BorderFactory.createEmptyBorder());
-        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        scrollPane.getVerticalScrollBar().setUnitIncrement(UIScale.scale(16));
 
-        // Buttons at bottom
-        JPanel buttonBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
-        saveButton.addActionListener(e -> onSave());
-        closeButton.addActionListener(e -> dispose());
-        restartButton.setVisible(false);
-        restartButton.addActionListener(e -> onRestartNow());
-        reloadButton.setVisible(false);
-        reloadButton.addActionListener(e -> onReload());
-
-        buttonBar.add(reloadButton);
-        buttonBar.add(saveButton);
-        if (mode == Mode.RUNTIME) {
-            buttonBar.add(restartButton);
-        }
-        buttonBar.add(closeButton);
-
-        JPanel topWrapper = new JPanel(new BorderLayout(4, 4));
+        JPanel topWrapper = new JPanel(new BorderLayout(0, UIScale.scale(4)));
         topWrapper.add(statusBanner, BorderLayout.NORTH);
 
         content.add(topWrapper, BorderLayout.NORTH);
         content.add(scrollPane, BorderLayout.CENTER);
-        content.add(buttonBar, BorderLayout.SOUTH);
+        content.add(buildFooterPanel(), BorderLayout.SOUTH);
 
         setContentPane(content);
     }
 
     private void buildAdvancedPanel() {
         advancedPanel.setBorder(BorderFactory.createTitledBorder("Advanced Transfer Settings"));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(3, 4, 3, 4);
-
         int arow = 0;
         chunkSizeField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Chunk Size (bytes):", chunkSizeField, "(max " + TransferProtocol.MAX_CHUNK_BYTES + ")");
+        addFormRow(advancedPanel, arow++, "Chunk Size (bytes):", chunkSizeField, "(max " + TransferProtocol.MAX_CHUNK_BYTES + ")");
 
         trackerReadTimeoutField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Tracker Timeout (ms):", trackerReadTimeoutField, null);
+        addFormRow(advancedPanel, arow++, "Tracker Timeout (ms):", trackerReadTimeoutField, null);
 
         transferReadTimeoutField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Transfer Read Timeout (ms):", transferReadTimeoutField, null);
+        addFormRow(advancedPanel, arow++, "Transfer Read Timeout (ms):", transferReadTimeoutField, null);
 
         transferPromptTimeoutField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Prompt Timeout (ms):", transferPromptTimeoutField, null);
+        addFormRow(advancedPanel, arow++, "Prompt Timeout (ms):", transferPromptTimeoutField, null);
 
         transferOfferTimeoutField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Offer Response Timeout (ms):", transferOfferTimeoutField, "(must be > Prompt Timeout)");
+        addFormRow(advancedPanel, arow++, "Offer Response Timeout (ms):", transferOfferTimeoutField, "(must be > Prompt Timeout)");
 
         transferVerifyTimeoutField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Verify Timeout (ms):", transferVerifyTimeoutField, null);
+        addFormRow(advancedPanel, arow++, "Verify Timeout (ms):", transferVerifyTimeoutField, null);
 
         maxConcurrentField.putClientProperty("html.disable", Boolean.TRUE);
-        addFormRow(advancedPanel, gbc, arow++, "Max Concurrent Transfers:", maxConcurrentField, "(1 - 64)");
+        addFormRow(advancedPanel, arow++, "Max Concurrent Transfers:", maxConcurrentField, "(1 - 64)");
     }
 
     private void toggleAdvancedSection() {
@@ -466,30 +513,128 @@ public class SettingsDialog extends JDialog {
         toggleAdvancedBtn.setText(advancedVisible ? "Hide Advanced Settings ▲" : "Show Advanced Settings ▼");
         revalidate();
         repaint();
+        if (advancedVisible) {
+            SwingUtilities.invokeLater(() -> toggleAdvancedBtn.scrollRectToVisible(
+                    new Rectangle(0, 0, toggleAdvancedBtn.getWidth(), toggleAdvancedBtn.getHeight())
+            ));
+        }
     }
 
-    private void addFormRow(JPanel panel, GridBagConstraints gbc, int row, String labelText, Component field, String hint) {
-        gbc.gridx = 0;
-        gbc.gridy = row;
-        gbc.gridwidth = 1;
-        gbc.weightx = 0;
+    private void addFormRow(JPanel panel, int row, String labelText, Component field, String hint) {
+        GridBagConstraints lgbc = new GridBagConstraints();
+        lgbc.gridx = 0;
+        lgbc.gridy = row;
+        lgbc.gridwidth = 1;
+        lgbc.weightx = 0.0;
+        lgbc.anchor = GridBagConstraints.NORTHWEST;
+        lgbc.fill = GridBagConstraints.NONE;
+        lgbc.insets = new Insets(UIScale.scale(4), UIScale.scale(4), UIScale.scale(4), UIScale.scale(8));
+
         JLabel lbl = new JLabel(labelText);
         lbl.putClientProperty("html.disable", Boolean.TRUE);
-        panel.add(lbl, gbc);
+        lbl.setLabelFor(field);
+        panel.add(lbl, lgbc);
 
-        gbc.gridx = 1;
-        gbc.weightx = 1.0;
-        if (hint != null) {
-            JPanel fieldWithHint = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-            fieldWithHint.add(field);
-            JLabel hintLbl = new JLabel(hint);
-            hintLbl.putClientProperty("html.disable", Boolean.TRUE);
-            hintLbl.setForeground(Color.GRAY);
-            fieldWithHint.add(hintLbl);
-            panel.add(fieldWithHint, gbc);
+        GridBagConstraints fgbc = new GridBagConstraints();
+        fgbc.gridx = 1;
+        fgbc.gridy = row;
+        fgbc.gridwidth = 1;
+        fgbc.weightx = 1.0;
+        fgbc.anchor = GridBagConstraints.NORTHWEST;
+        fgbc.fill = GridBagConstraints.HORIZONTAL;
+        fgbc.insets = new Insets(UIScale.scale(4), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
+
+        if (hint != null && !hint.isBlank()) {
+            JPanel fieldWithHint = new JPanel(new GridBagLayout());
+            fieldWithHint.setOpaque(false);
+
+            GridBagConstraints c1 = new GridBagConstraints();
+            c1.gridx = 0;
+            c1.gridy = 0;
+            c1.weightx = 1.0;
+            c1.fill = GridBagConstraints.HORIZONTAL;
+            c1.anchor = GridBagConstraints.WEST;
+            c1.insets = new Insets(0, 0, UIScale.scale(2), 0);
+            fieldWithHint.add(field, c1);
+
+            JTextArea hintArea = new JTextArea(hint);
+            hintArea.setEditable(false);
+            hintArea.setFocusable(false);
+            hintArea.setOpaque(false);
+            hintArea.setLineWrap(true);
+            hintArea.setWrapStyleWord(true);
+            hintArea.putClientProperty("FlatLaf.styleClass", "muted");
+            hintArea.putClientProperty("html.disable", Boolean.TRUE);
+
+            GridBagConstraints c2 = new GridBagConstraints();
+            c2.gridx = 0;
+            c2.gridy = 1;
+            c2.weightx = 1.0;
+            c2.fill = GridBagConstraints.HORIZONTAL;
+            c2.anchor = GridBagConstraints.WEST;
+            c2.insets = new Insets(0, 0, 0, 0);
+            fieldWithHint.add(hintArea, c2);
+
+            panel.add(fieldWithHint, fgbc);
         } else {
-            panel.add(field, gbc);
+            panel.add(field, fgbc);
         }
+    }
+
+    private JPanel buildFooterPanel() {
+        JPanel footer = new JPanel(new GridBagLayout());
+        footer.setBorder(BorderFactory.createEmptyBorder(UIScale.scale(6), 0, 0, 0));
+
+        // Row 0: conditional actions (Reload from disk, Restart now)
+        JPanel topRow = new JPanel(new GridBagLayout());
+        topRow.setOpaque(false);
+        GridBagConstraints tgbc = new GridBagConstraints();
+        tgbc.insets = new Insets(0, UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
+
+        reloadButton.setVisible(false);
+        reloadButton.addActionListener(e -> onReload());
+        tgbc.gridx = 0;
+        topRow.add(reloadButton, tgbc);
+
+        if (mode == Mode.RUNTIME) {
+            restartButton.setVisible(false);
+            restartButton.addActionListener(e -> onRestartNow());
+            tgbc.gridx = 1;
+            topRow.add(restartButton, tgbc);
+        }
+
+        GridBagConstraints fgbc0 = new GridBagConstraints();
+        fgbc0.gridx = 0;
+        fgbc0.gridy = 0;
+        fgbc0.weightx = 1.0;
+        fgbc0.anchor = GridBagConstraints.EAST;
+        fgbc0.fill = GridBagConstraints.NONE;
+        footer.add(topRow, fgbc0);
+
+        // Row 1: main actions (Save, Close)
+        JPanel bottomRow = new JPanel(new GridBagLayout());
+        bottomRow.setOpaque(false);
+        GridBagConstraints bgbc = new GridBagConstraints();
+        bgbc.insets = new Insets(0, UIScale.scale(4), 0, UIScale.scale(4));
+
+        saveButton.putClientProperty("FlatLaf.styleClass", "primary");
+        saveButton.addActionListener(e -> onSave());
+        bgbc.gridx = 0;
+        bottomRow.add(saveButton, bgbc);
+
+        closeButton.addActionListener(e -> dispose());
+        bgbc.gridx = 1;
+        bottomRow.add(closeButton, bgbc);
+
+        GridBagConstraints fgbc1 = new GridBagConstraints();
+        fgbc1.gridx = 0;
+        fgbc1.gridy = 1;
+        fgbc1.weightx = 1.0;
+        fgbc1.anchor = GridBagConstraints.EAST;
+        fgbc1.fill = GridBagConstraints.NONE;
+        footer.add(bottomRow, fgbc1);
+
+        return footer;
     }
 
     private void populateFields() {
@@ -918,22 +1063,28 @@ public class SettingsDialog extends JDialog {
     }
 
     private void showError(String message) {
-        statusBanner.setBackground(new Color(255, 230, 230));
-        statusBanner.setForeground(new Color(180, 0, 0));
+        Color bg = MainFrame.getSemanticColor("P2P.pending.background", new Color(255, 230, 230));
+        Color fg = MainFrame.getSemanticColor("P2P.error.foreground", new Color(180, 0, 0));
+        statusBanner.setBackground(bg);
+        statusBanner.setForeground(fg);
         statusBanner.setText(message);
         statusBanner.setVisible(true);
     }
 
     private void showSuccess(String message) {
-        statusBanner.setBackground(new Color(230, 255, 230));
-        statusBanner.setForeground(new Color(0, 140, 0));
+        Color bg = MainFrame.getSemanticColor("P2P.pending.background", new Color(230, 255, 230));
+        Color fg = MainFrame.getSemanticColor("P2P.success.foreground", new Color(0, 140, 0));
+        statusBanner.setBackground(bg);
+        statusBanner.setForeground(fg);
         statusBanner.setText(message);
         statusBanner.setVisible(true);
     }
 
     private void showInfo(String message) {
-        statusBanner.setBackground(new Color(230, 240, 255));
-        statusBanner.setForeground(new Color(0, 70, 160));
+        Color bg = MainFrame.getSemanticColor("P2P.pending.background", new Color(230, 240, 255));
+        Color fg = MainFrame.getSemanticColor("P2P.accent.foreground", new Color(0, 70, 160));
+        statusBanner.setBackground(bg);
+        statusBanner.setForeground(fg);
         statusBanner.setText(message);
         statusBanner.setVisible(true);
     }

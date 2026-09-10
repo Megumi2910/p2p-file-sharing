@@ -1,4 +1,5 @@
 package vn.edu.p2p.peer.ui;
+import com.formdev.flatlaf.util.UIScale;
 
 import vn.edu.p2p.peer.PeerRuntime;
 import vn.edu.p2p.peer.config.ConfigStore;
@@ -38,6 +39,18 @@ import java.util.function.Consumer;
 public class UpdateDialog extends JDialog {
 
     public static final String GITHUB_RELEASES_URL = "https://github.com/Megumi2910/p2p-file-sharing/releases";
+    private static JTextArea createWrappingDetailArea() {
+        JTextArea area = new JTextArea();
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.putClientProperty("FlatLaf.styleClass", "muted");
+        area.putClientProperty("html.disable", Boolean.TRUE);
+        return area;
+    }
+
 
     private final UpdateService updateService;
     private final PeerRuntime runtime;
@@ -45,7 +58,7 @@ public class UpdateDialog extends JDialog {
     private final ConfigStore configStore;
     private final JLabel currentVersionLabel = new JLabel();
     private final JLabel statusLabel = new JLabel("Status: Not checked");
-    private final JLabel detailLabel = new JLabel();
+    private final JTextArea detailLabel = createWrappingDetailArea();
     private final JProgressBar progressBar = new JProgressBar();
     private final JTextArea notesArea = new JTextArea();
     private final JScrollPane notesScrollPane;
@@ -78,9 +91,6 @@ public class UpdateDialog extends JDialog {
 
     private void init() {
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setMinimumSize(new Dimension(540, 420));
-        setPreferredSize(new Dimension(600, 480));
-
         buildUi();
 
         // Escape closes
@@ -108,20 +118,22 @@ public class UpdateDialog extends JDialog {
 
         updateService.addListener(updateListener);
 
-        pack();
+        DesktopLayout.fitWindow(this, new Dimension(600, 480), new Dimension(540, 420));
         setLocationRelativeTo(getOwner());
     }
 
     private void buildUi() {
-        JPanel content = new JPanel(new BorderLayout(8, 8));
-        content.setBorder(BorderFactory.createEmptyBorder(12, 16, 12, 16));
+        JPanel content = new JPanel(new BorderLayout(0, UIScale.scale(8)));
+        content.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(12), UIScale.scale(16), UIScale.scale(12), UIScale.scale(16)
+        ));
 
         // Header
         JPanel headerPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(3, 4, 3, 4);
+        gbc.insets = new Insets(UIScale.scale(3), UIScale.scale(4), UIScale.scale(3), UIScale.scale(4));
 
         int row = 0;
         currentVersionLabel.setText("Installed Version: " + updateService.releaseClient().buildInfo().displayVersion());
@@ -142,8 +154,6 @@ public class UpdateDialog extends JDialog {
         gbc.gridy = row++;
         headerPanel.add(statusLabel, gbc);
 
-        detailLabel.putClientProperty("html.disable", Boolean.TRUE);
-        detailLabel.setForeground(Color.GRAY);
         gbc.gridy = row++;
         headerPanel.add(detailLabel, gbc);
 
@@ -159,26 +169,73 @@ public class UpdateDialog extends JDialog {
         notesArea.putClientProperty("html.disable", Boolean.TRUE);
         notesScrollPane.setBorder(BorderFactory.createTitledBorder("Release Notes"));
 
-        // Bottom: Action buttons
-        JPanel buttonBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
-
-        checkButton.addActionListener(e -> updateService.checkForUpdates());
-        downloadButton.addActionListener(e -> updateService.downloadAvailableUpdate());
-        cancelButton.addActionListener(e -> updateService.cancelDownload());
-        installButton.addActionListener(e -> onInstallAndRestart());
-        closeButton.addActionListener(e -> dispose());
-
-        buttonBar.add(checkButton);
-        buttonBar.add(downloadButton);
-        buttonBar.add(cancelButton);
-        buttonBar.add(installButton);
-        buttonBar.add(closeButton);
-
         content.add(headerPanel, BorderLayout.NORTH);
         content.add(notesScrollPane, BorderLayout.CENTER);
-        content.add(buttonBar, BorderLayout.SOUTH);
+        content.add(buildFooterPanel(), BorderLayout.SOUTH);
 
         setContentPane(content);
+    }
+
+    private JPanel buildFooterPanel() {
+        JPanel footer = new JPanel(new GridBagLayout());
+        footer.setBorder(BorderFactory.createEmptyBorder(UIScale.scale(4), 0, 0, 0));
+
+        // Row 0: Check now + Action button (Download/Cancel/Install)
+        JPanel topRow = new JPanel(new GridBagLayout());
+        topRow.setOpaque(false);
+        GridBagConstraints tgbc = new GridBagConstraints();
+        tgbc.insets = new Insets(0, UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
+
+        checkButton.putClientProperty("html.disable", Boolean.TRUE);
+        checkButton.addActionListener(e -> updateService.checkForUpdates());
+        tgbc.gridx = 0;
+        topRow.add(checkButton, tgbc);
+
+        downloadButton.putClientProperty("FlatLaf.styleClass", "primary");
+        downloadButton.putClientProperty("html.disable", Boolean.TRUE);
+        downloadButton.addActionListener(e -> updateService.downloadAvailableUpdate());
+        tgbc.gridx = 1;
+        topRow.add(downloadButton, tgbc);
+
+        cancelButton.putClientProperty("html.disable", Boolean.TRUE);
+        cancelButton.addActionListener(e -> updateService.cancelDownload());
+        tgbc.gridx = 2;
+        topRow.add(cancelButton, tgbc);
+
+        installButton.putClientProperty("FlatLaf.styleClass", "primary");
+        installButton.putClientProperty("html.disable", Boolean.TRUE);
+        installButton.addActionListener(e -> onInstallAndRestart());
+        tgbc.gridx = 3;
+        topRow.add(installButton, tgbc);
+
+        GridBagConstraints fgbc0 = new GridBagConstraints();
+        fgbc0.gridx = 0;
+        fgbc0.gridy = 0;
+        fgbc0.weightx = 1.0;
+        fgbc0.anchor = GridBagConstraints.EAST;
+        fgbc0.fill = GridBagConstraints.NONE;
+        footer.add(topRow, fgbc0);
+
+        // Row 1: Close
+        JPanel bottomRow = new JPanel(new GridBagLayout());
+        bottomRow.setOpaque(false);
+        GridBagConstraints bgbc = new GridBagConstraints();
+        bgbc.insets = new Insets(0, UIScale.scale(4), 0, UIScale.scale(4));
+
+        closeButton.putClientProperty("html.disable", Boolean.TRUE);
+        closeButton.addActionListener(e -> dispose());
+        bgbc.gridx = 0;
+        bottomRow.add(closeButton, bgbc);
+
+        GridBagConstraints fgbc1 = new GridBagConstraints();
+        fgbc1.gridx = 0;
+        fgbc1.gridy = 1;
+        fgbc1.weightx = 1.0;
+        fgbc1.anchor = GridBagConstraints.EAST;
+        fgbc1.fill = GridBagConstraints.NONE;
+        footer.add(bottomRow, fgbc1);
+
+        return footer;
     }
 
     private void applySnapshot(UpdateService.UpdateSnapshot snapshot) {
@@ -302,6 +359,8 @@ public class UpdateDialog extends JDialog {
         } else {
             notesArea.setText("");
         }
+        revalidate();
+        repaint();
     }
 
     private void onInstallAndRestart() {

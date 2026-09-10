@@ -1,4 +1,5 @@
 package vn.edu.p2p.peer.ui;
+import com.formdev.flatlaf.util.UIScale;
 
 import vn.edu.p2p.peer.transfer.TransferStatus;
 import vn.edu.p2p.peer.transfer.TransferUpdate;
@@ -49,6 +50,7 @@ public final class ChunkVisualizerPanel extends JPanel {
     private final JProgressBar fallbackProgress = new JProgressBar(0, 100);
     private final JLabel fallbackLabel = new JLabel("Per-chunk map unavailable for this transfer.");
 
+    private TransferUpdate lastUpdate;
     public ChunkVisualizerPanel() {
         super(new BorderLayout());
         buildUi();
@@ -149,16 +151,13 @@ public final class ChunkVisualizerPanel extends JPanel {
         legendPanel.add(new LegendItem("Partial range", () -> getSemanticColor("P2P.accent.foreground", new Color(33, 93, 176))));
         legendPanel.add(new LegendItem("Missing", () -> getSemanticColor("P2P.pending.background", new Color(222, 229, 237))));
 
-        JPanel headerLegendRow = new JPanel(new BorderLayout(8, 0));
-        headerLegendRow.setOpaque(false);
-        headerLegendRow.setAlignmentX(Component.LEFT_ALIGNMENT);
-        headerLegendRow.add(coverageHeaderLabel, BorderLayout.WEST);
-        headerLegendRow.add(legendPanel, BorderLayout.EAST);
-        content.add(headerLegendRow);
-        content.add(Box.createVerticalStrut(6));
+        content.add(coverageHeaderLabel);
+        content.add(Box.createVerticalStrut(UIScale.scale(4)));
+        content.add(legendPanel);
+        content.add(Box.createVerticalStrut(UIScale.scale(6)));
 
         // Coverage Canvas & Fallback container
-        coverageCanvas.setPreferredSize(new Dimension(500, 24));
+        coverageCanvas.setPreferredSize(new Dimension(UIScale.scale(500), UIScale.scale(24)));
         coverageCanvas.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         fallbackProgress.setStringPainted(true);
@@ -181,6 +180,7 @@ public final class ChunkVisualizerPanel extends JPanel {
     }
 
     public void updateFrom(TransferUpdate update) {
+        this.lastUpdate = update;
         if (update == null) {
             fileNameArea.setText("No transfer selected");
             statusLabel.setText("Status: -");
@@ -248,6 +248,25 @@ public final class ChunkVisualizerPanel extends JPanel {
         repaint();
     }
 
+    public void refreshTheme() {
+        if (statusLabel == null) {
+            return;
+        }
+        if (lastUpdate == null) {
+            statusLabel.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+        } else {
+            statusLabel.setForeground(getStatusColor(lastUpdate.status()));
+        }
+        revalidate();
+        repaint();
+    }
+
+    @Override
+    public void updateUI() {
+        super.updateUI();
+        refreshTheme();
+    }
+
     private static String formatSentenceCase(TransferStatus status) {
         if (status == null) return "-";
         return switch (status) {
@@ -291,9 +310,12 @@ public final class ChunkVisualizerPanel extends JPanel {
         private final java.util.function.Supplier<Color> colorSupplier;
 
         LegendItem(String labelText, java.util.function.Supplier<Color> colorSupplier) {
-            super(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            super(new FlowLayout(FlowLayout.LEFT, UIScale.scale(4), 0));
             setOpaque(false);
             this.colorSupplier = colorSupplier;
+
+            final int size = UIScale.scale(14);
+            final int arc = UIScale.scale(4);
 
             JPanel swatch = new JPanel() {
                 @Override
@@ -303,22 +325,19 @@ public final class ChunkVisualizerPanel extends JPanel {
                     try {
                         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                         g2.setColor(colorSupplier.get());
-                        g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 4, 4);
+                        g2.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, arc, arc);
                         g2.setColor(getSemanticColor("P2P.borderColor", Color.LIGHT_GRAY));
-                        g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 4, 4);
+                        g2.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, arc, arc);
                     } finally {
                         g2.dispose();
                     }
                 }
             };
-            swatch.setPreferredSize(new Dimension(14, 14));
+            swatch.setPreferredSize(new Dimension(size, size));
             swatch.setOpaque(false);
             add(swatch);
 
             JLabel label = new JLabel(labelText);
-            Font baseFont = UIManager.getFont("Label.font");
-            float fontSize = baseFont != null ? Math.max(11f, baseFont.getSize2D() - 2f) : 11f;
-            label.setFont((baseFont != null ? baseFont : label.getFont()).deriveFont(fontSize));
             label.putClientProperty("html.disable", Boolean.TRUE);
             add(label);
         }

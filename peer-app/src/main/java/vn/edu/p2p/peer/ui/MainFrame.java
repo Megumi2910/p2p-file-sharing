@@ -57,7 +57,8 @@ import java.awt.Rectangle;
 import java.awt.Toolkit;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import javax.swing.plaf.FontUIResource;
+import javax.swing.border.Border;
+import com.formdev.flatlaf.util.UIScale;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.nio.file.Path;
@@ -69,6 +70,18 @@ import java.util.concurrent.RejectedExecutionException;
 
 public final class MainFrame extends JFrame implements TransferListener {
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private static JTextArea createWrappingLabel(String text) {
+        JTextArea area = new JTextArea(text);
+        area.setEditable(false);
+        area.setFocusable(false);
+        area.setOpaque(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.putClientProperty("FlatLaf.styleClass", "muted");
+        area.putClientProperty("html.disable", Boolean.TRUE);
+        return area;
+    }
+
 
     private final PeerRuntime runtime;
     private final vn.edu.p2p.peer.config.ConfigStore configStore;
@@ -91,7 +104,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final CardLayout peerListCardLayout = new CardLayout();
     private final JPanel peerListCardPanel = new JPanel(peerListCardLayout);
     private final JLabel peerEmptyTitle = new JLabel("No peers listed");
-    private final JLabel peerEmptySubtitle = new JLabel("Start another peer, then refresh.");
+    private final JTextArea peerEmptySubtitle = createWrappingLabel("Start another peer, then refresh.");
     private final JButton refreshButton = new JButton("Refresh peers");
     private final JButton sendButton = new JButton("Send file...");
     private final JPopupMenu peerPopupMenu = new JPopupMenu();
@@ -117,7 +130,7 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final CardLayout searchCardLayout = new CardLayout();
     private final JPanel searchCardPanel = new JPanel(searchCardLayout);
     private final JLabel searchEmptyTitle = new JLabel("Find shared files");
-    private final JLabel searchEmptySubtitle = new JLabel("Enter a filename to search the catalogue.");
+    private final JTextArea searchEmptySubtitle = createWrappingLabel("Enter a filename to search the catalogue.");
     private final JPanel searchDetailPanel = new JPanel(new BorderLayout(4, 4));
     private final JTextArea searchDetailText = new JTextArea();
 
@@ -133,6 +146,10 @@ public final class MainFrame extends JFrame implements TransferListener {
     private boolean searching = false;
     private long searchSequence = 0;
     private boolean ignoreThemeEvents = false;
+    private boolean stopped = false;
+    private boolean restartFrozen = false;
+    private PeerListCellRenderer peerRenderer;
+    private final Runnable themeListener = this::onThemeChanged;
 
     public MainFrame(
             PeerRuntime runtime,
@@ -147,6 +164,7 @@ public final class MainFrame extends JFrame implements TransferListener {
         this.restartCoordinator = restartCoordinator;
         buildUi();
         wireUpdateListener();
+        DesktopTheme.addThemeChangeListener(themeListener);
     }
 
     public void setCloseHandler(Runnable closeHandler) {
@@ -166,17 +184,16 @@ public final class MainFrame extends JFrame implements TransferListener {
         });
         setLocationByPlatform(true);
 
-        applyWindowBounds();
-
         JPanel root = new JPanel(new BorderLayout(0, 0));
-        root.setBorder(BorderFactory.createEmptyBorder(12, 16, 16, 16));
+        root.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(12), UIScale.scale(16), UIScale.scale(16), UIScale.scale(16)
+        ));
 
         // 1. Header
         root.add(buildHeader(), BorderLayout.NORTH);
 
         // 2. Main Workspace split pane
         mainSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, buildPeersPanel(), buildTabsPanel());
-        mainSplit.setDividerLocation(260);
         mainSplit.setResizeWeight(0.0);
         mainSplit.setContinuousLayout(true);
         root.add(mainSplit, BorderLayout.CENTER);
@@ -186,49 +203,19 @@ public final class MainFrame extends JFrame implements TransferListener {
         wireActions();
         updateActionStates();
 
-        SwingUtilities.invokeLater(() -> {
-            if (mainSplit != null) {
-                mainSplit.setDividerLocation(260);
-            }
-        });
-    }
+        DesktopLayout.fitWindow(this, new Dimension(1200, 760), new Dimension(980, 620));
+        setLocationRelativeTo(null);
 
-    private void applyWindowBounds() {
-        Rectangle maxBounds = null;
-        try {
-            GraphicsConfiguration gc = getGraphicsConfiguration();
-            if (gc != null) {
-                Insets screenInsets = Toolkit.getDefaultToolkit().getScreenInsets(gc);
-                Rectangle screenBounds = gc.getBounds();
-                maxBounds = new Rectangle(
-                        screenBounds.x + screenInsets.left,
-                        screenBounds.y + screenInsets.top,
-                        screenBounds.width - screenInsets.left - screenInsets.right,
-                        screenBounds.height - screenInsets.top - screenInsets.bottom
-                );
-            }
-        } catch (Exception ignored) {
-        }
-
-        int targetWidth = 1200;
-        int targetHeight = 760;
-        int minWidth = 980;
-        int minHeight = 620;
-
-        if (maxBounds != null) {
-            targetWidth = Math.min(targetWidth, maxBounds.width);
-            targetHeight = Math.min(targetHeight, maxBounds.height);
-            minWidth = Math.min(minWidth, maxBounds.width);
-            minHeight = Math.min(minHeight, maxBounds.height);
-        }
-
-        setPreferredSize(new Dimension(targetWidth, targetHeight));
-        setMinimumSize(new Dimension(minWidth, minHeight));
+        int btnW = Math.max(sendButton.getPreferredSize().width, refreshButton.getPreferredSize().width);
+        int sidebarInitialWidth = Math.max(UIScale.scale(260), btnW + UIScale.scale(24));
+        mainSplit.setDividerLocation(sidebarInitialWidth);
     }
 
     private JPanel buildHeader() {
-        JPanel header = new JPanel(new BorderLayout(12, 8));
-        header.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
+        JPanel header = new JPanel(new GridBagLayout());
+        header.setBorder(BorderFactory.createEmptyBorder(0, 0, UIScale.scale(8), 0));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(2), UIScale.scale(4));
 
         // Left: Title + Subtitle
         JPanel titlePanel = new JPanel();
@@ -243,20 +230,33 @@ public final class MainFrame extends JFrame implements TransferListener {
         subtitleLabel.putClientProperty("html.disable", Boolean.TRUE);
 
         titlePanel.add(titleLabel);
-        titlePanel.add(Box.createVerticalStrut(2));
+        titlePanel.add(Box.createVerticalStrut(UIScale.scale(2)));
         titlePanel.add(subtitleLabel);
-        header.add(titlePanel, BorderLayout.WEST);
+
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.anchor = GridBagConstraints.WEST;
+        header.add(titlePanel, gbc);
 
         // Right: Settings button + Theme selector
-        JPanel controlsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
+        JPanel controlsPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints cgbc = new GridBagConstraints();
+        cgbc.insets = new Insets(0, UIScale.scale(4), 0, UIScale.scale(4));
+        cgbc.fill = GridBagConstraints.NONE;
+        cgbc.anchor = GridBagConstraints.EAST;
 
         settingsButton.putClientProperty("html.disable", Boolean.TRUE);
         settingsButton.addActionListener(e -> openSettingsDialog());
-        controlsPanel.add(settingsButton);
+        cgbc.gridx = 0;
+        controlsPanel.add(settingsButton, cgbc);
+
         JLabel themeLabel = new JLabel("Theme:");
         themeLabel.setLabelFor(themeCombo);
         themeLabel.putClientProperty("html.disable", Boolean.TRUE);
-        controlsPanel.add(themeLabel);
+        cgbc.gridx = 1;
+        controlsPanel.add(themeLabel, cgbc);
 
         UIManager.addPropertyChangeListener(evt -> {
             if ("lookAndFeel".equals(evt.getPropertyName())) {
@@ -273,51 +273,78 @@ public final class MainFrame extends JFrame implements TransferListener {
         themeCombo.putClientProperty("html.disable", Boolean.TRUE);
         themeCombo.setSelectedItem(DesktopTheme.isDark() ? "Dark" : "Light");
         themeCombo.addActionListener(e -> onThemeSelectionChanged());
-        controlsPanel.add(themeCombo);
+        cgbc.gridx = 2;
+        controlsPanel.add(themeCombo, cgbc);
 
-        header.add(controlsPanel, BorderLayout.EAST);
+        gbc.gridx = 1;
+        gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.anchor = GridBagConstraints.EAST;
+        header.add(controlsPanel, gbc);
 
-        // Separate toolbar for updates
-        JPanel updateToolBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
-        updateToolBar.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        // Updates row below
+        JPanel updateToolBar = new JPanel(new GridBagLayout());
+        updateToolBar.setBorder(BorderFactory.createEmptyBorder(UIScale.scale(2), 0, UIScale.scale(2), 0));
+        GridBagConstraints ugbc = new GridBagConstraints();
+        ugbc.insets = new Insets(0, 0, 0, UIScale.scale(8));
+        ugbc.gridx = 0;
+        ugbc.gridy = 0;
+        ugbc.weightx = 0.0;
+        ugbc.fill = GridBagConstraints.NONE;
+        ugbc.anchor = GridBagConstraints.WEST;
+
         updateButton.putClientProperty("html.disable", Boolean.TRUE);
         updateButton.addActionListener(e -> openUpdateDialog());
-        updateToolBar.add(updateButton);
+        updateToolBar.add(updateButton, ugbc);
 
         updateBadgeLabel.putClientProperty("html.disable", Boolean.TRUE);
         updateBadgeLabel.setVisible(false);
-        updateToolBar.add(updateBadgeLabel);
+        ugbc.gridx = 1;
+        ugbc.weightx = 1.0;
+        ugbc.fill = GridBagConstraints.HORIZONTAL;
+        updateToolBar.add(updateBadgeLabel, ugbc);
 
-        JPanel headerWrapper = new JPanel(new BorderLayout());
-        headerWrapper.add(header, BorderLayout.NORTH);
-        headerWrapper.add(updateToolBar, BorderLayout.CENTER);
-        headerWrapper.add(new JSeparator(SwingConstants.HORIZONTAL), BorderLayout.SOUTH);
-        return headerWrapper;
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.anchor = GridBagConstraints.WEST;
+        header.add(updateToolBar, gbc);
+
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        header.add(new JSeparator(SwingConstants.HORIZONTAL), gbc);
+
+        return header;
     }
 
     private JPanel buildPeersPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 8));
-        panel.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 8));
-        panel.setMinimumSize(new Dimension(200, 200));
-        panel.setPreferredSize(new Dimension(260, 400));
+        JPanel panel = new JPanel(new BorderLayout(0, UIScale.scale(8)));
+        panel.setBorder(BorderFactory.createEmptyBorder(UIScale.scale(8), 0, 0, UIScale.scale(8)));
 
         // Header caption
-        JPanel topHeader = new JPanel(new BorderLayout());
+        JPanel topHeader = new JPanel(new BorderLayout(0, UIScale.scale(2)));
         JLabel title = new JLabel("Online peers");
         title.putClientProperty("FlatLaf.styleClass", "h4");
         title.putClientProperty("html.disable", Boolean.TRUE);
+
         JLabel caption = new JLabel("Last refresh only");
-        caption.setFont(getDerivedFont(-1.5f));
-        caption.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+        caption.putClientProperty("FlatLaf.styleClass", "muted");
         caption.putClientProperty("html.disable", Boolean.TRUE);
+
         topHeader.add(title, BorderLayout.NORTH);
         topHeader.add(caption, BorderLayout.SOUTH);
         panel.add(topHeader, BorderLayout.NORTH);
 
         // Center: Peer list with CardLayout (list vs empty)
         peerList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        peerList.setFixedCellHeight(56);
-        peerList.setCellRenderer(new PeerListCellRenderer());
+        peerRenderer = new PeerListCellRenderer();
+        peerList.setCellRenderer(peerRenderer);
         peerList.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 updateActionStates();
@@ -333,7 +360,9 @@ public final class MainFrame extends JFrame implements TransferListener {
                         Rectangle bounds = peerList.getCellBounds(index, index);
                         if (bounds != null && bounds.contains(e.getPoint())) {
                             peerList.setSelectedIndex(index);
-                            chooseAndSend();
+                            if (canSend()) {
+                                chooseAndSend();
+                            }
                         }
                     }
                 }
@@ -357,7 +386,9 @@ public final class MainFrame extends JFrame implements TransferListener {
                         if (bounds != null && bounds.contains(e.getPoint())) {
                             peerList.setSelectedIndex(index);
                             updateActionStates();
-                            peerPopupMenu.show(peerList, e.getX(), e.getY());
+                            if (canOperate()) {
+                                peerPopupMenu.show(peerList, e.getX(), e.getY());
+                            }
                         }
                     }
                 }
@@ -370,16 +401,15 @@ public final class MainFrame extends JFrame implements TransferListener {
 
         JPanel emptyPanel = new JPanel();
         emptyPanel.setLayout(new BoxLayout(emptyPanel, BoxLayout.Y_AXIS));
-        emptyPanel.setBorder(BorderFactory.createEmptyBorder(24, 12, 12, 12));
+        emptyPanel.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(24), UIScale.scale(12), UIScale.scale(12), UIScale.scale(12)
+        ));
         peerEmptyTitle.putClientProperty("FlatLaf.styleClass", "h4");
         peerEmptyTitle.putClientProperty("html.disable", Boolean.TRUE);
         peerEmptyTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        peerEmptySubtitle.setFont(getDerivedFont(-1f));
-        peerEmptySubtitle.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
-        peerEmptySubtitle.putClientProperty("html.disable", Boolean.TRUE);
         peerEmptySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
         emptyPanel.add(peerEmptyTitle);
-        emptyPanel.add(Box.createVerticalStrut(4));
+        emptyPanel.add(Box.createVerticalStrut(UIScale.scale(4)));
         emptyPanel.add(peerEmptySubtitle);
         peerListCardPanel.add(emptyPanel, "empty");
 
@@ -387,9 +417,7 @@ public final class MainFrame extends JFrame implements TransferListener {
         panel.add(peerListCardPanel, BorderLayout.CENTER);
 
         // Buttons
-        // Buttons: Vertical stack ensures Send file... (primary action) is prominent
-        // and both buttons remain unclipped regardless of split pane position.
-        JPanel buttonsPanel = new JPanel(new GridLayout(2, 1, 0, 6));
+        JPanel buttonsPanel = new JPanel(new GridLayout(2, 1, 0, UIScale.scale(8)));
         sendButton.putClientProperty("html.disable", Boolean.TRUE);
         sendButton.putClientProperty("FlatLaf.styleClass", "primary");
         sendButton.setToolTipText("Select an online peer to send a file");
@@ -400,6 +428,12 @@ public final class MainFrame extends JFrame implements TransferListener {
         buttonsPanel.add(sendButton);
         buttonsPanel.add(refreshButton);
         panel.add(buttonsPanel, BorderLayout.SOUTH);
+
+        int btnW = Math.max(sendButton.getPreferredSize().width, refreshButton.getPreferredSize().width);
+        int sidebarInitialWidth = Math.max(UIScale.scale(260), btnW + UIScale.scale(24));
+        int sidebarMinWidth = Math.max(UIScale.scale(200), btnW + UIScale.scale(16));
+        panel.setMinimumSize(new Dimension(sidebarMinWidth, UIScale.scale(200)));
+        panel.setPreferredSize(new Dimension(sidebarInitialWidth, UIScale.scale(400)));
 
         return panel;
     }
@@ -412,6 +446,8 @@ public final class MainFrame extends JFrame implements TransferListener {
         tabbedPane.addTab("Catalogue Search", buildSearchTab());
         tabbedPane.addTab("Activity Log", buildLogTab());
 
+        updateTableRowHeights();
+
         panel.add(tabbedPane, BorderLayout.CENTER);
         return panel;
     }
@@ -419,7 +455,6 @@ public final class MainFrame extends JFrame implements TransferListener {
     private JPanel buildTransfersTab() {
         JPanel panel = new JPanel(new BorderLayout(0, 8));
 
-        transfersTable.setRowHeight(36);
         transfersTable.setFillsViewportHeight(true);
         transfersTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         transfersTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
@@ -467,12 +502,8 @@ public final class MainFrame extends JFrame implements TransferListener {
         emptyTitle.putClientProperty("html.disable", Boolean.TRUE);
         emptyTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        JLabel emptySubtitle = new JLabel("Select a peer and choose Send file, or download from Catalogue Search.");
-        emptySubtitle.setFont(getDerivedFont(0f));
-        emptySubtitle.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
-        emptySubtitle.putClientProperty("html.disable", Boolean.TRUE);
+        JTextArea emptySubtitle = createWrappingLabel("Select a peer and choose Send file, or download from Catalogue Search.");
         emptySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-
         emptyPanel.add(emptyTitle);
         emptyPanel.add(Box.createVerticalStrut(8));
         emptyPanel.add(emptySubtitle);
@@ -533,8 +564,6 @@ public final class MainFrame extends JFrame implements TransferListener {
         topBar.add(downloadButton);
         panel.add(topBar, BorderLayout.NORTH);
 
-        // Search table
-        searchTable.setRowHeight(36);
         searchTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         searchTable.setFillsViewportHeight(true);
         setupSearchColumns();
@@ -576,11 +605,7 @@ public final class MainFrame extends JFrame implements TransferListener {
         emptyPanel.setBorder(BorderFactory.createEmptyBorder(48, 24, 24, 24));
         searchEmptyTitle.putClientProperty("FlatLaf.styleClass", "h3");
         searchEmptyTitle.putClientProperty("html.disable", Boolean.TRUE);
-        searchEmptyTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-        searchEmptySubtitle.setFont(getDerivedFont(0f));
-        searchEmptySubtitle.putClientProperty("html.disable", Boolean.TRUE);
         searchEmptySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-
         emptyPanel.add(searchEmptyTitle);
         emptyPanel.add(Box.createVerticalStrut(8));
         emptyPanel.add(searchEmptySubtitle);
@@ -605,11 +630,7 @@ public final class MainFrame extends JFrame implements TransferListener {
         colModel.getColumn(0).setCellRenderer(new LeftAlignCellRenderer());
         colModel.getColumn(1).setCellRenderer(new RightAlignCellRenderer());
         colModel.getColumn(2).setCellRenderer(new RightAlignCellRenderer());
-
-        DefaultTableCellRenderer monoRenderer = new DefaultTableCellRenderer();
-        monoRenderer.setFont(getMonospacedFont());
-        colModel.getColumn(3).setCellRenderer(monoRenderer);
-
+        colModel.getColumn(3).setCellRenderer(new MonospacedCellRenderer());
         colModel.getColumn(4).setCellRenderer(new LeftAlignCellRenderer());
     }
 
@@ -646,7 +667,7 @@ public final class MainFrame extends JFrame implements TransferListener {
         JPanel panel = new JPanel(new BorderLayout(0, 8));
 
         logArea.setEditable(false);
-        logArea.setFont(getMonospacedFont());
+        logArea.putClientProperty("FlatLaf.styleClass", "monospaced");
         logArea.putClientProperty("html.disable", Boolean.TRUE);
 
         JScrollPane logScroll = new JScrollPane(logArea);
@@ -660,11 +681,8 @@ public final class MainFrame extends JFrame implements TransferListener {
         logEmptyTitle.putClientProperty("html.disable", Boolean.TRUE);
         logEmptyTitle.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        JLabel logEmptySubtitle = new JLabel("Events appear here while this application is running.");
-        logEmptySubtitle.setFont(getDerivedFont(0f));
-        logEmptySubtitle.putClientProperty("html.disable", Boolean.TRUE);
+        JTextArea logEmptySubtitle = createWrappingLabel("Events appear here while this application is running.");
         logEmptySubtitle.setAlignmentX(Component.CENTER_ALIGNMENT);
-
         emptyPanel.add(logEmptyTitle);
         emptyPanel.add(Box.createVerticalStrut(8));
         emptyPanel.add(logEmptySubtitle);
@@ -743,14 +761,12 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     public void setStopped(String detail) {
         SwingUtilities.invokeLater(() -> {
+            this.stopped = true;
             subtitleLabel.setText("Stopped — relaunch manually");
-            subtitleLabel.setForeground(Color.RED);
+            subtitleLabel.setForeground(getSemanticColor("P2P.error.foreground", Color.RED));
             updateButton.setEnabled(false);
             settingsButton.setEnabled(false);
-            refreshButton.setEnabled(false);
-            sendButton.setEnabled(false);
-            sendMenuItem.setEnabled(false);
-            downloadButton.setEnabled(false);
+            updateActionStates();
 
             JOptionPane.showMessageDialog(
                     this,
@@ -763,11 +779,13 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     public void freezeForRestart(boolean freeze) {
         SwingUtilities.invokeLater(() -> {
-            updateButton.setEnabled(!freeze);
-            settingsButton.setEnabled(!freeze);
+            this.restartFrozen = freeze;
+            updateButton.setEnabled(!freeze && !stopped);
+            settingsButton.setEnabled(!freeze && !stopped);
             if (settingsDialog != null && settingsDialog.isDisplayable()) {
                 settingsDialog.freezeEditing(freeze);
             }
+            updateActionStates();
         });
     }
 
@@ -793,16 +811,65 @@ public final class MainFrame extends JFrame implements TransferListener {
         updateActionStates();
     }
 
-    private void updateActionStates() {
-        refreshButton.setEnabled(!starting && !refreshing);
-        boolean canSend = !starting && peerList.getSelectedValue() != null;
-        sendButton.setEnabled(canSend);
-        sendMenuItem.setEnabled(canSend);
-        searchField.setEnabled(!starting);
-        searchButton.setEnabled(!starting);
-        downloadButton.setEnabled(!starting && !searching && hasUsableSearchResultSelected());
+    private boolean canOperate() {
+        return !starting && !stopped && !restartFrozen;
     }
 
+    private boolean canSend() {
+        return canOperate() && peerList.getSelectedValue() != null;
+    }
+
+    private void updateActionStates() {
+        boolean operate = canOperate();
+        refreshButton.setEnabled(operate && !refreshing);
+        boolean sendActive = canSend();
+        sendButton.setEnabled(sendActive);
+        sendMenuItem.setEnabled(sendActive);
+        searchField.setEnabled(operate);
+        searchButton.setEnabled(operate && !searching);
+        downloadButton.setEnabled(operate && !searching && hasUsableSearchResultSelected());
+    }
+
+    private void updateTableRowHeights() {
+        Font font = UIManager.getFont("Table.font");
+        if (font == null) {
+            font = transfersTable.getFont();
+        }
+        int fontH = font != null ? transfersTable.getFontMetrics(font).getHeight() : 16;
+        int progH = UIScale.scale(16);
+        int contentH = Math.max(fontH, progH);
+        int computedH = Math.max(UIScale.scale(36), contentH + UIScale.scale(12));
+        transfersTable.setRowHeight(computedH);
+        searchTable.setRowHeight(computedH);
+    }
+
+    private void onThemeChanged() {
+        updateTableRowHeights();
+
+        if (peerRenderer != null) {
+            peerRenderer.refreshTypography();
+        }
+        peerList.setCellRenderer(peerRenderer);
+        peerList.revalidate();
+        peerList.repaint();
+
+        if (visualizer != null) {
+            visualizer.refreshTheme();
+        }
+
+        if (peerPopupMenu != null) {
+            SwingUtilities.updateComponentTreeUI(peerPopupMenu);
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    @Override
+    public void dispose() {
+        DesktopTheme.removeThemeChangeListener(themeListener);
+        super.dispose();
+    }
     private boolean hasUsableSearchResultSelected() {
         int selectedRow = searchTable.getSelectedRow();
         if (selectedRow < 0) return false;
@@ -951,6 +1018,9 @@ public final class MainFrame extends JFrame implements TransferListener {
     }
 
     private void chooseAndSend() {
+        if (!canSend()) {
+            return;
+        }
         PeerInfo target = peerList.getSelectedValue();
         if (target == null) {
             JOptionPane.showMessageDialog(this, "Select an online peer first.");
@@ -1023,19 +1093,20 @@ public final class MainFrame extends JFrame implements TransferListener {
         return c != null ? c : fallback;
     }
 
-    static Font getDerivedFont(float delta) {
-        Font base = UIManager.getFont("Label.font");
-        if (base == null) {
-            base = new JLabel().getFont();
+    private static final class MonospacedCellRenderer extends DefaultTableCellRenderer {
+        MonospacedCellRenderer() {
+            putClientProperty("html.disable", Boolean.TRUE);
         }
-        float size = Math.max(10f, base.getSize2D() + delta);
-        return new FontUIResource(base.deriveFont(size));
-    }
 
-    static Font getMonospacedFont() {
-        Font base = UIManager.getFont("Label.font");
-        float size = base != null ? base.getSize2D() : 13f;
-        return new FontUIResource(new Font(Font.MONOSPACED, Font.PLAIN, Math.round(size)));
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            Font mono = UIManager.getFont("monospaced.font");
+            if (mono != null) {
+                setFont(mono);
+            }
+            return this;
+        }
     }
 
     // ---------------------------------------------------------
@@ -1043,20 +1114,39 @@ public final class MainFrame extends JFrame implements TransferListener {
     // ---------------------------------------------------------
 
     private static final class PeerListCellRenderer extends DefaultListCellRenderer {
-        private final JPanel cellPanel = new JPanel(new BorderLayout(4, 2));
+        private final JPanel cellPanel = new JPanel(new GridBagLayout());
         private final JLabel nameLabel = new JLabel();
         private final JLabel endpointLabel = new JLabel();
 
         PeerListCellRenderer() {
-            cellPanel.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
-            nameLabel.setFont(UIManager.getFont("Label.font").deriveFont(Font.BOLD));
+            refreshTypography();
+            GridBagConstraints gbc = new GridBagConstraints();
+            gbc.gridx = 0;
+            gbc.gridy = 0;
+            gbc.weightx = 1.0;
+            gbc.fill = GridBagConstraints.HORIZONTAL;
+            gbc.anchor = GridBagConstraints.WEST;
+            gbc.insets = new Insets(0, 0, UIScale.scale(4), 0);
+            cellPanel.add(nameLabel, gbc);
+
+            gbc.gridy = 1;
+            gbc.insets = new Insets(0, 0, 0, 0);
+            cellPanel.add(endpointLabel, gbc);
+        }
+
+        void refreshTypography() {
+            Font base = UIManager.getFont("Label.font");
+            if (base != null) {
+                nameLabel.setFont(base.deriveFont(Font.BOLD));
+                endpointLabel.setFont(base);
+            }
+            nameLabel.putClientProperty("FlatLaf.styleClass", "h4");
             nameLabel.putClientProperty("html.disable", Boolean.TRUE);
-
-            endpointLabel.setFont(getDerivedFont(-1.5f));
+            endpointLabel.putClientProperty("FlatLaf.styleClass", "muted");
             endpointLabel.putClientProperty("html.disable", Boolean.TRUE);
-
-            cellPanel.add(nameLabel, BorderLayout.NORTH);
-            cellPanel.add(endpointLabel, BorderLayout.SOUTH);
+            cellPanel.setBorder(BorderFactory.createEmptyBorder(
+                    UIScale.scale(8), UIScale.scale(10), UIScale.scale(8), UIScale.scale(10)
+            ));
         }
 
         @Override
@@ -1075,6 +1165,29 @@ public final class MainFrame extends JFrame implements TransferListener {
                     cellPanel.setBackground(list.getBackground());
                     nameLabel.setForeground(list.getForeground());
                     endpointLabel.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+                }
+
+                if (cellHasFocus) {
+                    Border focusBorder = UIManager.getBorder("List.focusCellHighlightBorder");
+                    if (focusBorder != null) {
+                        cellPanel.setBorder(BorderFactory.createCompoundBorder(
+                                focusBorder,
+                                BorderFactory.createEmptyBorder(
+                                        UIScale.scale(7), UIScale.scale(9), UIScale.scale(7), UIScale.scale(9)
+                                )
+                        ));
+                    } else {
+                        cellPanel.setBorder(BorderFactory.createCompoundBorder(
+                                BorderFactory.createLineBorder(getSemanticColor("P2P.accent.foreground", Color.BLUE), 1),
+                                BorderFactory.createEmptyBorder(
+                                        UIScale.scale(7), UIScale.scale(9), UIScale.scale(7), UIScale.scale(9)
+                                )
+                        ));
+                    }
+                } else {
+                    cellPanel.setBorder(BorderFactory.createEmptyBorder(
+                            UIScale.scale(8), UIScale.scale(10), UIScale.scale(8), UIScale.scale(10)
+                    ));
                 }
                 return cellPanel;
             }

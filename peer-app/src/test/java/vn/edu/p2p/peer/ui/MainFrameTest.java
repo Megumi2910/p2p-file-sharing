@@ -8,7 +8,6 @@ import vn.edu.p2p.peer.PeerRuntime;
 import vn.edu.p2p.peer.config.AppConfig;
 import vn.edu.p2p.peer.config.ConfigStore;
 import vn.edu.p2p.peer.update.BuildInfo;
-import vn.edu.p2p.peer.update.ClientVersion;
 import vn.edu.p2p.peer.update.ReleaseClient;
 import vn.edu.p2p.peer.update.RestartCoordinator;
 import vn.edu.p2p.peer.update.UpdateService;
@@ -17,20 +16,16 @@ import javax.swing.DefaultListModel;
 import javax.swing.JButton;
 import javax.swing.JList;
 import javax.swing.JMenuItem;
-import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
-import javax.swing.UIManager;
-import java.awt.Font;
 import java.awt.GraphicsEnvironment;
-import java.awt.GridLayout;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -52,25 +47,22 @@ class MainFrameTest {
     }
 
     @Test
-    void testFontUtilityMethods() {
-        Font derived = MainFrame.getDerivedFont(0f);
-        assertNotNull(derived);
-
-        Font derivedSmaller = MainFrame.getDerivedFont(-2f);
-        assertNotNull(derivedSmaller);
-        assertTrue(derivedSmaller.getSize2D() <= derived.getSize2D());
-
-        Font mono = MainFrame.getMonospacedFont();
-        assertNotNull(mono);
-        assertEquals(Font.MONOSPACED, mono.getFamily());
-    }
-
-    @Test
-    void testPeerPanelLayoutAndActionStates(@TempDir Path tempDir) throws Exception {
+    void testActionStateTransitionsAndLifecycle(@TempDir Path tempDir) throws Exception {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "Skipping GUI test in headless environment");
 
         Path configFile = tempDir.resolve("peer.properties");
-        Files.writeString(configFile, "peer.id=test\npeer.name=Test\npeer.port=6001\ntracker.host=127.0.0.1\ntracker.port=5000\nstorage.download.dir=" + tempDir.resolve("down") + "\nstorage.shared.dir=" + tempDir.resolve("share") + "\n");
+        Properties props = new Properties();
+        props.setProperty("peer.id", "test");
+        props.setProperty("peer.name", "Test");
+        props.setProperty("peer.port", "6001");
+        props.setProperty("tracker.host", "127.0.0.1");
+        props.setProperty("tracker.port", "5000");
+        props.setProperty("download.dir", tempDir.resolve("down").toString());
+        props.setProperty("shared.dir", tempDir.resolve("share").toString());
+        try (OutputStream out = Files.newOutputStream(configFile)) {
+            props.store(out, "test config");
+        }
+
         AppConfig config = AppConfig.load(configFile);
         PeerRuntime runtime = new PeerRuntime(config);
         ConfigStore store = new ConfigStore(configFile, tempDir);
@@ -78,6 +70,7 @@ class MainFrameTest {
         BuildInfo buildInfo = BuildInfo.load();
         ReleaseClient client = new ReleaseClient(buildInfo);
         UpdateService updateService = new UpdateService(client, tempDir);
+
         AtomicReference<MainFrame> frameRef = new AtomicReference<>();
         runOnEdt(() -> {
             MainFrame frame = new MainFrame(runtime, store, updateService, restarts);
@@ -95,40 +88,60 @@ class MainFrameTest {
             @SuppressWarnings("unchecked")
             DefaultListModel<PeerInfo> peerModel = (DefaultListModel<PeerInfo>) getFieldValue(frame, "peerModel");
 
-            // Verify parent panel layout is GridLayout with 2 rows, 1 col (stacked)
-            JPanel buttonsPanel = (JPanel) sendButton.getParent();
-            assertNotNull(buttonsPanel);
-            assertTrue(buttonsPanel.getLayout() instanceof GridLayout);
-            GridLayout layout = (GridLayout) buttonsPanel.getLayout();
-            assertEquals(2, layout.getRows());
-            assertEquals(1, layout.getColumns());
-            assertEquals(sendButton, buttonsPanel.getComponent(0), "Primary sendButton must be top button");
-            assertEquals(refreshButton, buttonsPanel.getComponent(1), "refreshButton must be bottom button");
-
-            // Verify context menu has sendMenuItem
+            // Context menu contains sendMenuItem
             assertNotNull(peerPopupMenu);
             assertEquals(sendMenuItem, peerPopupMenu.getComponent(0));
 
-            // Initially starting=false, no peer selected -> send disabled
-            runOnEdt(() -> {
-                frame.setStarting(false);
-            });
-            assertFalse(sendButton.isEnabled(), "Send button should be disabled when no peer is selected");
-            assertFalse(sendMenuItem.isEnabled(), "Send menu item should be disabled when no peer is selected");
-            assertTrue(refreshButton.isEnabled(), "Refresh button should be enabled");
+            // 1. Initial state: starting=true -> send and refresh disabled
+            assertFalse(sendButton.isEnabled(), "Send button must be disabled while starting");
+            assertFalse(sendMenuItem.isEnabled(), "Send menu item must be disabled while starting");
+            assertFalse(refreshButton.isEnabled(), "Refresh button must be disabled while starting");
 
-            // Add a peer and select it -> send becomes enabled
-            runOnEdt(() -> {
-                PeerInfo peer = new PeerInfo("peer-target", "Target", "127.0.0.1", 6002);
-                peerModel.addElement(peer);
-                peerList.setSelectedValue(peer, true);
-            });
+            // 2. State transition: starting -> ready (starting=false)
+            runOnEdt(() -> frame.setStarting(false));
+            assertTrue(refreshButton.isEnabled(), "Refresh button should become enabled when ready");
+            assertFalse(sendButton.isEnabled(), "Send button should remain disabled when no peer is selected");
+            assertFalse(sendMenuItem.isEnabled(), "Send menu item should remain disabled when no peer is selected");
 
+            // 3. Selection: add peer and select it -> send actions become enabled
+            PeerInfo peer1 = new PeerInfo("peer-target-1", "Target 1", "127.0.0.1", 6002);
+            PeerInfo peer2 = new PeerInfo("peer-target-2", "Target 2", "127.0.0.1", 6003);
+            runOnEdt(() -> {
+                peerModel.addElement(peer1);
+                peerModel.addElement(peer2);
+                peerList.setSelectedValue(peer1, true);
+            });
             assertTrue(sendButton.isEnabled(), "Send button should be enabled when a peer is selected");
             assertTrue(sendMenuItem.isEnabled(), "Send menu item should be enabled when a peer is selected");
+
+            // 4. Freeze for restart: disables send actions
+            runOnEdt(() -> frame.freezeForRestart(true));
+            assertFalse(sendButton.isEnabled(), "Send button must be disabled while frozen for restart");
+            assertFalse(sendMenuItem.isEnabled(), "Send menu item must be disabled while frozen for restart");
+
+            // Unfreeze: restores enabled state for selected peer
+            runOnEdt(() -> frame.freezeForRestart(false));
+            assertTrue(sendButton.isEnabled(), "Send button should be re-enabled after unfreeze");
+            assertTrue(sendMenuItem.isEnabled(), "Send menu item should be re-enabled after unfreeze");
+
+            // 5. Stopped: permanently disables send and refresh
+            runOnEdt(() -> frame.setStopped("Testing stopped transition"));
+            assertFalse(sendButton.isEnabled(), "Send button must be disabled when stopped");
+            assertFalse(sendMenuItem.isEnabled(), "Send menu item must be disabled when stopped");
+            assertFalse(refreshButton.isEnabled(), "Refresh button must be disabled when stopped");
+
+            // Changing selection after stopped MUST NOT re-enable send actions
+            runOnEdt(() -> peerList.setSelectedValue(peer2, true));
+            assertFalse(sendButton.isEnabled(), "Selecting a peer after stopped must not re-enable send button");
+            assertFalse(sendMenuItem.isEnabled(), "Selecting a peer after stopped must not re-enable send menu item");
         } finally {
             runOnEdt(frame::dispose);
             updateService.close();
+            runtime.close();
         }
+    }
+
+    private static void assertEquals(Object expected, Object actual) {
+        org.junit.jupiter.api.Assertions.assertEquals(expected, actual);
     }
 }

@@ -37,3 +37,20 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: java "-Djava.awt.headless=false" -cp "peer-app/target/peer-app.jar;tracker-server/target/tracker-server.jar;peer-app/target/test-classes" vn.edu.p2p.peer.ClientUpdateSmoke
+
+      - name: Run DesktopUiSmoke (Ubuntu, scales 1, 1.25, 1.5, 2)
+        if: runner.os == 'Linux'
+        run: |
+          for scale in 1 1.25 1.5 2; do
+            echo "=== Running DesktopUiSmoke at scale $scale ==="
+            xvfb-run -a -s "-screen 0 2560x1600x24" java -Djava.awt.headless=false -cp "peer-app/target/peer-app.jar:tracker-server/target/tracker-server.jar:peer-app/target/test-classes" vn.edu.p2p.peer.DesktopUiSmoke --scale $scale
+          done
+
+      - name: Run DesktopUiSmoke (Windows, scales 1, 1.25, 1.5, 2)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for scale in 1 1.25 1.5 2; do
+            echo "=== Running DesktopUiSmoke at scale $scale ==="
+            java "-Djava.awt.headless=false" -cp "peer-app/target/peer-app.jar;tracker-server/target/tracker-server.jar;peer-app/target/test-classes" vn.edu.p2p.peer.DesktopUiSmoke --scale $scale
+          done

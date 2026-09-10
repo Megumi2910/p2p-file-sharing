@@ -12,6 +12,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class DesktopTheme {
     private static final String THEME_PACKAGE = "vn.edu.p2p.peer.ui.theme";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
+    private static final java.util.List<Runnable> THEME_LISTENERS = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public static void addThemeChangeListener(Runnable listener) {
+        if (listener != null) {
+            THEME_LISTENERS.add(listener);
+        }
+    }
+
+    public static void removeThemeChangeListener(Runnable listener) {
+        if (listener != null) {
+            THEME_LISTENERS.remove(listener);
+        }
+    }
 
     private DesktopTheme() {
     }
@@ -32,6 +45,12 @@ public final class DesktopTheme {
         }
         UIManager.setLookAndFeel(dark ? new FlatDarkLaf() : new FlatLightLaf());
         FlatLaf.updateUI();
+        for (Runnable listener : THEME_LISTENERS) {
+            try {
+                listener.run();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     public static boolean isDark() {

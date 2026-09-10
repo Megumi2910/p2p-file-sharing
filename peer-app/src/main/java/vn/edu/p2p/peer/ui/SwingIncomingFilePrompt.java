@@ -1,10 +1,15 @@
 package vn.edu.p2p.peer.ui;
+import com.formdev.flatlaf.util.UIScale;
 
 import vn.edu.p2p.common.model.FileMetadata;
 import vn.edu.p2p.peer.transfer.IncomingFilePrompt;
 
 import javax.swing.BorderFactory;
+import javax.swing.JComponent;
+import javax.swing.ScrollPaneConstants;
+import javax.swing.Scrollable;
 import javax.swing.JDialog;
+import javax.swing.JScrollPane;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
@@ -13,6 +18,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.UIManager;
 import java.awt.Component;
+import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -45,11 +51,11 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
                 return;
             }
 
-            JPanel panel = buildMessagePanel(metadata, sender);
+            JComponent messageComponent = buildMessagePanel(metadata, sender);
 
             Object[] options = new Object[]{OPTION_ACCEPT, OPTION_REJECT};
             JOptionPane pane = new JOptionPane(
-                    panel,
+                    messageComponent,
                     JOptionPane.QUESTION_MESSAGE,
                     JOptionPane.DEFAULT_OPTION,
                     null,
@@ -59,8 +65,9 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
 
             JDialog dialog = pane.createDialog(parent, "Incoming file");
             dialog.setModal(false);
+            DesktopLayout.fitWindow(dialog, new Dimension(520, 360), new Dimension(420, 260));
+            dialog.setLocationRelativeTo(parent);
             dialogRef.set(dialog);
-
             Timer timer = new Timer((int) Math.min(timeoutMillis, (long) Integer.MAX_VALUE), e -> {
                 if (resolved.compareAndSet(false, true)) {
                     dialog.dispose();
@@ -118,13 +125,46 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
         }
     }
 
-    private static JPanel buildMessagePanel(FileMetadata metadata, InetSocketAddress sender) {
-        JPanel panel = new JPanel(new GridBagLayout());
-        panel.setBorder(BorderFactory.createEmptyBorder(4, 4, 8, 4));
+    private static final class ScrollablePanel extends JPanel implements Scrollable {
+        ScrollablePanel(GridBagLayout layout) {
+            super(layout);
+        }
+
+        @Override
+        public Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(java.awt.Rectangle visibleRect, int orientation, int direction) {
+            return UIScale.scale(16);
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(java.awt.Rectangle visibleRect, int orientation, int direction) {
+            return UIScale.scale(48);
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight() {
+            return false;
+        }
+    }
+
+    private static JComponent buildMessagePanel(FileMetadata metadata, InetSocketAddress sender) {
+        JPanel panel = new ScrollablePanel(new GridBagLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(
+                UIScale.scale(6), UIScale.scale(8), UIScale.scale(6), UIScale.scale(8)
+        ));
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.fill = GridBagConstraints.HORIZONTAL;
         gbc.anchor = GridBagConstraints.NORTHWEST;
-        gbc.insets = new Insets(2, 4, 4, 4);
+        gbc.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(4), UIScale.scale(4));
 
         // Heading
         gbc.gridx = 0;
@@ -139,6 +179,7 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
         gbc.gridy = 1;
         JTextArea fnArea = new JTextArea(metadata.fileName());
         fnArea.setEditable(false);
+        fnArea.setFocusable(false);
         fnArea.setLineWrap(true);
         fnArea.setWrapStyleWord(true);
         fnArea.setOpaque(false);
@@ -164,9 +205,13 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
 
         gbc.gridx = 1;
         gbc.weightx = 1.0;
-        JLabel senderVal = new JLabel(metadata.senderName());
+        JTextArea senderVal = new JTextArea(metadata.senderName());
+        senderVal.setEditable(false);
+        senderVal.setFocusable(false);
+        senderVal.setLineWrap(true);
+        senderVal.setWrapStyleWord(true);
+        senderVal.setOpaque(false);
         senderVal.putClientProperty("html.disable", Boolean.TRUE);
-        panel.add(senderVal, gbc);
 
         // Size
         gbc.gridy = 4;
@@ -208,13 +253,20 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
         gbc.weightx = 1.0;
         JTextArea epVal = new JTextArea(sender != null ? sender.toString() : "-");
         epVal.setEditable(false);
+        epVal.setFocusable(false);
         epVal.setLineWrap(true);
+        epVal.setWrapStyleWord(true);
         epVal.setOpaque(false);
-        epVal.setFont(UIManager.getFont("Label.font"));
+        epVal.putClientProperty("FlatLaf.styleClass", "muted");
         epVal.putClientProperty("html.disable", Boolean.TRUE);
         panel.add(epVal, gbc);
 
-        return panel;
+        JScrollPane scroll = new JScrollPane(panel);
+        scroll.setBorder(BorderFactory.createEmptyBorder());
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.getVerticalScrollBar().setUnitIncrement(UIScale.scale(12));
+        scroll.setPreferredSize(new Dimension(UIScale.scale(460), UIScale.scale(230)));
+        return scroll;
     }
 
     private static void cleanupDialogOnEdt(AtomicBoolean resolved, AtomicReference<Timer> timerRef, AtomicReference<JDialog> dialogRef) {

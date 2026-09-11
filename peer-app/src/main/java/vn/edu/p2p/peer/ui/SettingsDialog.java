@@ -142,6 +142,7 @@ public class SettingsDialog extends JDialog {
     private final JButton restartButton = new JButton("Restart now");
     private final JButton reloadButton = new JButton("Reload from disk");
     private final JButton closeButton;
+    private volatile boolean operationInProgress = false;
 
     public static boolean showBootstrapDialog(ConfigStore configStore, String initialError) {
         return showBootstrapDialog(configStore, initialError, null);
@@ -283,22 +284,25 @@ public class SettingsDialog extends JDialog {
             populateFields();
         }
 
+        setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
+
         // Escape closes
         getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
                 .put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "closeDialog");
         getRootPane().getActionMap().put("closeDialog", new AbstractAction() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                dispose();
+                requestClose();
             }
         });
 
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                dispose();
+                requestClose();
             }
         });
+        closeButton.addActionListener(e -> requestClose());
         DesktopLayout.fitWindow(this, new Dimension(680, 600), new Dimension(600, 480));
         setLocationRelativeTo(getOwner());
     }
@@ -621,8 +625,6 @@ public class SettingsDialog extends JDialog {
         saveButton.addActionListener(e -> onSave());
         bgbc.gridx = 0;
         bottomRow.add(saveButton, bgbc);
-
-        closeButton.addActionListener(e -> dispose());
         bgbc.gridx = 1;
         bottomRow.add(closeButton, bgbc);
 
@@ -805,6 +807,7 @@ public class SettingsDialog extends JDialog {
             saveButton.setEnabled(false);
             reloadButton.setEnabled(false);
             closeButton.setEnabled(false);
+            operationInProgress = true;
 
             new SwingWorker<ConfigSnapshot, Void>() {
                 @Override
@@ -814,29 +817,32 @@ public class SettingsDialog extends JDialog {
 
                 @Override
                 protected void done() {
-                    saveButton.setEnabled(true);
-                    reloadButton.setEnabled(true);
-                    closeButton.setEnabled(true);
                     try {
-                        currentSnapshot = get();
-                        savedSuccess = true;
-                        dispose();
-                    } catch (ExecutionException ex) {
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        if (cause instanceof ConfigConflictException) {
-                            showError("Conflict: configuration was modified externally. Please reload settings.");
-                            reloadButton.setVisible(true);
-                        } else {
-                            showError("Save failed: " + cause.getMessage());
+                        saveButton.setEnabled(true);
+                        reloadButton.setEnabled(true);
+                        closeButton.setEnabled(true);
+                        try {
+                            currentSnapshot = get();
+                            savedSuccess = true;
+                            dispose();
+                        } catch (ExecutionException ex) {
+                            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                            if (cause instanceof ConfigConflictException) {
+                                showError("Conflict: configuration was modified externally. Please reload settings.");
+                                reloadButton.setVisible(true);
+                            } else {
+                                showError("Save failed: " + cause.getMessage());
+                            }
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
                         }
-                    } catch (InterruptedException ex) {
-                        Thread.currentThread().interrupt();
+                    } finally {
+                        operationInProgress = false;
                     }
                 }
             }.execute();
             return;
         }
-
         Map<String, String> edits = new LinkedHashMap<>();
         checkAndPutEdit(edits, "peer.id", peerIdField.getText().trim());
         checkAndPutEdit(edits, "peer.name", displayNameField.getText().trim());
@@ -869,6 +875,7 @@ public class SettingsDialog extends JDialog {
         saveButton.setEnabled(false);
         reloadButton.setEnabled(false);
         closeButton.setEnabled(false);
+        operationInProgress = true;
 
         new SwingWorker<ConfigSnapshot, Void>() {
             @Override
@@ -878,42 +885,46 @@ public class SettingsDialog extends JDialog {
 
             @Override
             protected void done() {
-                saveButton.setEnabled(true);
-                reloadButton.setEnabled(true);
-                closeButton.setEnabled(true);
                 try {
-                    currentSnapshot = get();
-                    savedSuccess = true;
-                    reloadButton.setVisible(false);
+                    saveButton.setEnabled(true);
+                    reloadButton.setEnabled(true);
+                    closeButton.setEnabled(true);
+                    try {
+                        currentSnapshot = get();
+                        savedSuccess = true;
+                        reloadButton.setVisible(false);
 
-                    if (mode == Mode.BOOTSTRAP) {
-                        dispose();
-                    } else {
-                        showSuccess("Saved; applies after restart.");
-                        updateDifferingFieldsNotice();
-                        if (restartCoordinator != null && restartCoordinator.isAutomatedRestartSupported()) {
-                            restartButton.setVisible(true);
+                        if (mode == Mode.BOOTSTRAP) {
+                            dispose();
+                        } else {
+                            showSuccess("Saved; applies after restart.");
+                            updateDifferingFieldsNotice();
+                            if (restartCoordinator != null && restartCoordinator.isAutomatedRestartSupported()) {
+                                restartButton.setVisible(true);
+                            }
                         }
+                    } catch (ExecutionException ex) {
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                        if (cause instanceof ConfigConflictException) {
+                            showError("Conflict: configuration was modified externally. Please reload settings.");
+                            reloadButton.setVisible(true);
+                        } else {
+                            showError("Save failed: " + cause.getMessage());
+                        }
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
                     }
-                } catch (ExecutionException ex) {
-                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    if (cause instanceof ConfigConflictException) {
-                        showError("Conflict: configuration was modified externally. Please reload settings.");
-                        reloadButton.setVisible(true);
-                    } else {
-                        showError("Save failed: " + cause.getMessage());
-                    }
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
+                } finally {
+                    operationInProgress = false;
                 }
             }
         }.execute();
     }
-
     private void onReload() {
         hideBanner();
         saveButton.setEnabled(false);
         reloadButton.setEnabled(false);
+        operationInProgress = true;
 
         new SwingWorker<ConfigSnapshot, Void>() {
             @Override
@@ -923,54 +934,55 @@ public class SettingsDialog extends JDialog {
 
             @Override
             protected void done() {
-                saveButton.setEnabled(true);
-                reloadButton.setEnabled(true);
                 try {
-                    currentSnapshot = get();
-                    reloadButton.setVisible(false);
-                    if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR) {
-                        mode = Mode.BOOTSTRAP;
-                        syntaxException = null;
-                        buildUi();
-                        populateFields();
-                        revalidate();
-                        repaint();
-                        showSuccess("Configuration on disk is now valid. Review settings and click Save and start.");
-                    } else {
-                        populateFields();
-                        showSuccess("Reloaded latest configuration from disk.");
-                    }
-                } catch (ExecutionException ex) {
-                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    if (cause instanceof ConfigStore.SyntaxException synEx) {
-                        currentSnapshot = synEx.snapshot();
-                        syntaxException = synEx;
+                    saveButton.setEnabled(true);
+                    reloadButton.setEnabled(true);
+                    try {
+                        currentSnapshot = get();
                         reloadButton.setVisible(false);
-                        if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR && syntaxTextArea != null) {
-                            syntaxTextArea.setText(synEx.sourceText());
-                            syntaxTextArea.setCaretPosition(0);
-                            showSuccess("Reloaded external changes. Please repair and click Save and start.");
-                        } else {
-                            mode = Mode.BOOTSTRAP_SYNTAX_REPAIR;
+                        if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR) {
+                            mode = Mode.BOOTSTRAP;
+                            syntaxException = null;
                             buildUi();
+                            populateFields();
                             revalidate();
                             repaint();
-                            showSuccess("Configuration on disk has syntax errors. Please repair.");
+                            showSuccess("Configuration on disk is now valid. Review settings and click Save and start.");
+                        } else {
+                            populateFields();
+                            showSuccess("Reloaded latest configuration from disk.");
                         }
-                    } else {
-                        showError("Reload failed: " + cause.getMessage());
+                    } catch (ExecutionException ex) {
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                        if (cause instanceof ConfigStore.SyntaxException synEx) {
+                            currentSnapshot = synEx.snapshot();
+                            syntaxException = synEx;
+                            reloadButton.setVisible(false);
+                            if (mode == Mode.BOOTSTRAP_SYNTAX_REPAIR && syntaxTextArea != null) {
+                                syntaxTextArea.setText(synEx.sourceText());
+                                syntaxTextArea.setCaretPosition(0);
+                                showSuccess("Reloaded external changes. Please repair and click Save and start.");
+                            } else {
+                                mode = Mode.BOOTSTRAP_SYNTAX_REPAIR;
+                                buildUi();
+                                revalidate();
+                                repaint();
+                                showSuccess("Configuration on disk has syntax errors. Please repair.");
+                            }
+                        } else {
+                            showError("Reload failed: " + cause.getMessage());
+                        }
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
                     }
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
+                } finally {
+                    operationInProgress = false;
                 }
             }
         }.execute();
     }
-    private void onRestartNow() {
-        if (restartCoordinator == null || runtime == null) {
-            return;
-        }
 
+    private void onRestartNow() {
         if (hasUnsavedChanges()) {
             showError("Save or cancel settings first");
             return;
@@ -989,6 +1001,7 @@ public class SettingsDialog extends JDialog {
         saveButton.setEnabled(false);
         restartButton.setEnabled(false);
         closeButton.setEnabled(false);
+        operationInProgress = true;
         if (getOwner() instanceof MainFrame mainFrame) {
             mainFrame.freezeForRestart(true);
         }
@@ -1000,6 +1013,7 @@ public class SettingsDialog extends JDialog {
                 });
             } catch (RestartCoordinator.RestartFailure ex) {
                 SwingUtilities.invokeLater(() -> {
+                    operationInProgress = false;
                     showError("Restart stopped: " + ex.getMessage());
                     if (getOwner() instanceof MainFrame mainFrame) {
                         mainFrame.setStopped("Stopped — relaunch manually\nConfig: " + configStore.targetPath() + "\nCwd: " + configStore.workingDirectory() + "\nError: " + ex.getMessage());
@@ -1008,6 +1022,7 @@ public class SettingsDialog extends JDialog {
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
+                    operationInProgress = false;
                     saveButton.setEnabled(true);
                     restartButton.setEnabled(true);
                     closeButton.setEnabled(true);
@@ -1033,6 +1048,7 @@ public class SettingsDialog extends JDialog {
             return syntaxTextArea != null && syntaxException != null
                     && !Objects.equals(syntaxException.sourceText(), syntaxTextArea.getText());
         }
+
         if (currentSnapshot == null) {
             return false;
         }
@@ -1060,6 +1076,34 @@ public class SettingsDialog extends JDialog {
         if (!Objects.equals(currentSnapshot.getProperty("transfer.max.concurrent", "4").trim(), maxConcurrentField.getText().trim())) return true;
 
         return false;
+    }
+
+    public boolean confirmDiscardChanges() {
+        if (operationInProgress) {
+            showError("Wait for the current settings operation to finish.");
+            return false;
+        }
+        if (!hasUnsavedChanges()) {
+            return true;
+        }
+        Object[] options = {"Keep editing", "Discard changes"};
+        int choice = JOptionPane.showOptionDialog(
+                this,
+                "You have unsaved changes. Discard them?",
+                "Unsaved settings",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                options,
+                options[0]
+        );
+        return choice == 1;
+    }
+
+    private void requestClose() {
+        if (confirmDiscardChanges()) {
+            dispose();
+        }
     }
 
     private void showError(String message) {

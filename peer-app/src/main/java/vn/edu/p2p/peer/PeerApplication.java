@@ -401,6 +401,9 @@ public final class PeerApplication {
     private static void setupCloseHandler(MainFrame frame, PeerRuntime runtime, UpdateService updateService) {
         AtomicBoolean closing = new AtomicBoolean(false);
         Runnable closeApp = () -> {
+            if (!frame.confirmDiscardUnsavedSettings()) {
+                return;
+            }
             if (!closing.compareAndSet(false, true)) {
                 return;
             }

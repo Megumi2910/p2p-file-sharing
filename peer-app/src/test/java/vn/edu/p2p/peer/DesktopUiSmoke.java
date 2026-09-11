@@ -12,6 +12,7 @@ import vn.edu.p2p.peer.ui.UpdateDialog;
 import vn.edu.p2p.peer.update.BuildInfo;
 import vn.edu.p2p.peer.update.ClientVersion;
 import vn.edu.p2p.peer.update.ReleaseClient;
+import vn.edu.p2p.peer.update.ReleaseFixtureClient;
 import vn.edu.p2p.peer.update.RestartCoordinator;
 import vn.edu.p2p.peer.update.UpdateService;
 import vn.edu.p2p.peer.util.HashUtil;
@@ -21,24 +22,22 @@ import javax.imageio.ImageIO;
 import javax.swing.AbstractButton;
 import javax.swing.DefaultListModel;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
-import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dimension;
-import java.awt.FontMetrics;
 import java.awt.Frame;
 import java.awt.GraphicsEnvironment;
 import java.awt.Point;
@@ -48,26 +47,21 @@ import java.awt.Window;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.time.Duration;
-import java.time.Instant;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HexFormat;
 import java.util.List;
-import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -84,8 +78,7 @@ public class DesktopUiSmoke {
         }
 
         if (scaleArg == null) {
-            // Spawn each scale (1, 1.25, 1.5, 2) in its own fresh JVM
-            System.out.println("[DesktopUiSmoke] No --scale specified. Running suite serially across scales: 1, 1.25, 1.5, 2");
+            System.out.println("[DesktopUiSmoke] Running suite across scales: 1, 1.25, 1.5, 2");
             List<String> scales = List.of("1", "1.25", "1.5", "2");
             for (String scale : scales) {
                 System.out.println("\n========================================================");
@@ -97,11 +90,10 @@ public class DesktopUiSmoke {
             return;
         }
 
-        // Running for a specific scale
         System.setProperty("flatlaf.uiScale", scaleArg);
 
         if (GraphicsEnvironment.isHeadless()) {
-            System.err.println("FATAL: DesktopUiSmoke requires a graphical environment. Headless execution is a hard failure, not a skip.");
+            System.err.println("FATAL: DesktopUiSmoke requires a graphical environment.");
             System.exit(1);
         }
 
@@ -121,11 +113,31 @@ public class DesktopUiSmoke {
         String javaBin = Path.of(javaHome, "bin", "java").toString();
         String classpath = System.getProperty("java.class.path");
 
+        Path fixtureDir;
+        try {
+            fixtureDir = Files.createTempDirectory("smoke-fixture-scale-" + scale);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to create fixture dir", e);
+        }
+
+        Path peerJar = Path.of("peer-app", "target", "peer-app.jar").toAbsolutePath();
+        Path trackerJar = Path.of("tracker-server", "target", "tracker-server.jar").toAbsolutePath();
+        String effectiveCp = classpath;
+        if (Files.exists(peerJar) && Files.exists(trackerJar)) {
+            try {
+                Path copyPeer = fixtureDir.resolve("peer-app.jar");
+                Path copyTracker = fixtureDir.resolve("tracker-server.jar");
+                Files.copy(peerJar, copyPeer, StandardCopyOption.REPLACE_EXISTING);
+                Files.copy(trackerJar, copyTracker, StandardCopyOption.REPLACE_EXISTING);
+                effectiveCp = copyPeer + File.pathSeparator + copyTracker + File.pathSeparator + classpath;
+            } catch (IOException ignored) {}
+        }
+
         List<String> command = List.of(
                 javaBin,
                 "-Djava.awt.headless=false",
                 "-cp",
-                classpath,
+                effectiveCp,
                 "vn.edu.p2p.peer.DesktopUiSmoke",
                 "--scale",
                 scale
@@ -152,30 +164,34 @@ public class DesktopUiSmoke {
     private static void executeSmoke(String scale) throws Exception {
         System.out.println("[DesktopUiSmoke] Initializing test harness for scale " + scale + "...");
 
-        Path smokeRoot = Path.of("target", "smoke-scratch", "scale-" + scale).toAbsolutePath().normalize();
-        Files.createDirectories(smokeRoot);
+        Path smokeRoot = Files.createTempDirectory("desktop-smoke-scratch-scale-" + scale).toAbsolutePath().normalize();
         Path screenshotDir = Path.of("target", "smoke-screenshots", "scale-" + scale).toAbsolutePath().normalize();
         Files.createDirectories(screenshotDir);
 
         Path aliceHome = smokeRoot.resolve("alice");
         Path bobHome = smokeRoot.resolve("bob");
+        Path charlieHome = smokeRoot.resolve("charlie");
         Path aliceShared = aliceHome.resolve("shared");
         Path aliceDown = aliceHome.resolve("downloads");
         Path bobShared = bobHome.resolve("shared");
         Path bobDown = bobHome.resolve("downloads");
+        Path charlieShared = charlieHome.resolve("shared");
+        Path charlieDown = charlieHome.resolve("downloads");
 
         Files.createDirectories(aliceShared);
         Files.createDirectories(aliceDown);
         Files.createDirectories(bobShared);
         Files.createDirectories(bobDown);
+        Files.createDirectories(charlieShared);
+        Files.createDirectories(charlieDown);
 
-        // Start in-process tracker server
-        TrackerServer tracker = new TrackerServer(0);
+        // Start tracker
+        AtomicReference<TrackerServer> trackerRef = new AtomicReference<>(new TrackerServer(0));
         Thread trackerThread = new Thread(() -> {
             try {
-                tracker.start();
-            } catch (IOException ignored) {
-            }
+                TrackerServer t = trackerRef.get();
+                if (t != null) t.start();
+            } catch (IOException ignored) {}
         }, "smoke-tracker");
         trackerThread.setDaemon(true);
         trackerThread.start();
@@ -184,7 +200,8 @@ public class DesktopUiSmoke {
         int trackerPort = 0;
         while (System.currentTimeMillis() < deadline) {
             try {
-                trackerPort = tracker.localPort();
+                TrackerServer t = trackerRef.get();
+                if (t != null) trackerPort = t.localPort();
                 if (trackerPort > 0) break;
             } catch (Exception ignored) {
                 Thread.sleep(20);
@@ -194,15 +211,12 @@ public class DesktopUiSmoke {
             throw new IllegalStateException("Tracker failed to bind port");
         }
 
-        // Probing ports for peers
         int alicePort;
-        try (ServerSocket probe = new ServerSocket(0)) {
-            alicePort = probe.getLocalPort();
-        }
+        try (ServerSocket probe = new ServerSocket(0)) { alicePort = probe.getLocalPort(); }
         int bobPort;
-        try (ServerSocket probe = new ServerSocket(0)) {
-            bobPort = probe.getLocalPort();
-        }
+        try (ServerSocket probe = new ServerSocket(0)) { bobPort = probe.getLocalPort(); }
+        int charliePort;
+        try (ServerSocket probe = new ServerSocket(0)) { charliePort = probe.getLocalPort(); }
 
         Path aliceConfigPath = aliceHome.resolve("peer.properties");
         Properties aliceProps = new Properties();
@@ -218,69 +232,76 @@ public class DesktopUiSmoke {
             aliceProps.store(out, "Alice smoke properties");
         }
 
-        AppConfig configAlice = AppConfig.load(aliceConfigPath);
-        PeerRuntime runtimeAlice = new PeerRuntime(configAlice);
-        ConfigStore storeAlice = new ConfigStore(aliceConfigPath, aliceHome.resolve("cfg-store"));
-        RestartCoordinator restartsAlice = new RestartCoordinator(aliceHome.resolve("restarts"));
-        BuildInfo buildInfo = BuildInfo.load();
-        ReleaseClient releaseClient = new ReleaseClient(buildInfo);
-        UpdateService updateService = new UpdateService(releaseClient, aliceHome.resolve("updates"));
-
-        // Bob runtime (secondary background peer with dynamic prompt)
-        AtomicBoolean bobAutoAccept = new AtomicBoolean(true);
+        // Bob secondary peer
         AppConfig configBob = new AppConfig(
                 "bob-smoke", "Bob Secondary", bobPort, "127.0.0.1", trackerPort, bobDown, bobShared, 16384, false,
                 15000, 15000, 120000, 135000, 300000, 4
         );
         PeerRuntime runtimeBob = new PeerRuntime(configBob);
-        runtimeBob.transferManager().setIncomingFilePrompt((meta, sender, timeout) -> bobAutoAccept.get());
+        JFrame bobFrame = new JFrame("Bob Host");
+        SwingIncomingFilePrompt bobPrompt = new SwingIncomingFilePrompt(bobFrame);
+        runtimeBob.transferManager().setIncomingFilePrompt(bobPrompt);
 
-        // Share a file from Bob so Catalogue Search finds it
+        // Share a file from Bob
         Path sharedBobFile = bobShared.resolve("shared-catalogue-item.txt");
-        byte[] bobFileContent = "This is a shared test file from Bob for search testing.\n".getBytes(StandardCharsets.UTF_8);
-        Files.write(sharedBobFile, bobFileContent);
+        Files.writeString(sharedBobFile, "This is a shared test file from Bob for search testing.\n");
         String bobFileId = HashUtil.sha256(sharedBobFile);
+
+        // Charlie: third real peer with long Unicode name to verify row measurement
+        AppConfig configCharlie = new AppConfig(
+                "charlie-smoke", "Nguyễn Văn A 🌟 [VN-HCM - Test Long Display Name]", charliePort, "127.0.0.1", trackerPort,
+                charlieDown, charlieShared, 16384, true,
+                15000, 15000, 120000, 135000, 300000, 4
+        );
+        PeerRuntime runtimeCharlie = new PeerRuntime(configCharlie);
+
         runtimeBob.start();
-        runtimeAlice.start();
+        runtimeCharlie.start();
+
         Robot robot = new Robot();
         robot.setAutoDelay(40);
 
-        AtomicReference<MainFrame> frameRef = new AtomicReference<>();
+        // Launch Alice through PeerApplication.launch
+        BuildInfo buildInfo = BuildInfo.load();
+        ReleaseClient releaseClient = ReleaseFixtureClient.createDefault(buildInfo);
+        PeerApplication.launch(new String[]{aliceConfigPath.toString()}, releaseClient);
 
-        try {
-            // Install Theme on EDT
-            SwingUtilities.invokeAndWait(() -> {
-                try {
-                    DesktopTheme.install();
-                } catch (Exception ex) {
-                    throw new RuntimeException("DesktopTheme install failed", ex);
+        // Find Alice MainFrame
+        long frameDeadline = System.currentTimeMillis() + 12000;
+        MainFrame frame = null;
+        while (System.currentTimeMillis() < frameDeadline) {
+            for (Frame f : Frame.getFrames()) {
+                if (f instanceof MainFrame mf && mf.isShowing()) {
+                    frame = mf;
+                    break;
                 }
-            });
+            }
+            if (frame != null) break;
+            Thread.sleep(100);
+        }
+        if (frame == null) {
+            throw new IllegalStateException("MainFrame was not displayed within deadline");
+        }
 
-            // Launch MainFrame on EDT
-            SwingUtilities.invokeAndWait(() -> {
-                MainFrame frame = new MainFrame(runtimeAlice, storeAlice, updateService, restartsAlice);
-                frameRef.set(frame);
-                frame.setVisible(true);
-                frame.setStarting(false);
-                runtimeAlice.transferManager().setListener(frame);
-                runtimeAlice.transferManager().setIncomingFilePrompt(new SwingIncomingFilePrompt(frame));
-            });
+        long startDeadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < startDeadline) {
+            Boolean isStarting = (Boolean) getFieldValue(frame, "starting");
+            if (isStarting != null && !isStarting) break;
+            Thread.sleep(100);
+        }
 
-            MainFrame frame = frameRef.get();
+        PeerRuntime runtimeAlice = (PeerRuntime) getFieldValue(frame, "runtime");
+        try {
             robot.waitForIdle();
-            Thread.sleep(300);
+            Thread.sleep(400);
 
-            // -----------------------------------------------------------------
             // 1. Initial Window Geometry & Visual Capture
-            // -----------------------------------------------------------------
             System.out.println("[DesktopUiSmoke] Verifying window geometry and bounds...");
             Dimension frameSize = frame.getSize();
             Dimension minSize = frame.getMinimumSize();
             System.out.println("  Window Size: " + frameSize.width + "x" + frameSize.height +
                     ", Minimum: " + minSize.width + "x" + minSize.height);
 
-            // Clamp check: verify within reasonable bounds
             if (minSize.width <= 0 || minSize.height <= 0) {
                 throw new AssertionError("Invalid minimum size: " + minSize);
             }
@@ -290,9 +311,7 @@ public class DesktopUiSmoke {
 
             captureScreenshot(robot, frame, screenshotDir.resolve("01-main-window-light.png"));
 
-            // -----------------------------------------------------------------
             // 2. Theme Switching: Light -> Dark -> Light
-            // -----------------------------------------------------------------
             System.out.println("[DesktopUiSmoke] Testing Light -> Dark -> Light theme switching...");
             SwingUtilities.invokeAndWait(() -> {
                 try {
@@ -321,9 +340,7 @@ public class DesktopUiSmoke {
                 throw new AssertionError("DesktopTheme.isDark() must be false after reverting to light theme");
             }
 
-            // -----------------------------------------------------------------
-            // 3. Peer List Rows & Disjoint Text Rectangles
-            // -----------------------------------------------------------------
+            // 3. Peer List Discovery (real registered peers Bob and Charlie)
             System.out.println("[DesktopUiSmoke] Testing peer list row metrics and text geometry...");
             JButton refreshBtn = (JButton) getFieldValue(frame, "refreshButton");
             JButton sendBtn = (JButton) getFieldValue(frame, "sendButton");
@@ -332,32 +349,18 @@ public class DesktopUiSmoke {
             @SuppressWarnings("unchecked")
             DefaultListModel<PeerInfo> peerModel = (DefaultListModel<PeerInfo>) getFieldValue(frame, "peerModel");
 
-            // Click refresh peers using real Robot mouse click
             clickComponent(robot, refreshBtn);
             robot.waitForIdle();
 
-            // Wait for Bob to appear or add manually to model
-            long refreshDeadline = System.currentTimeMillis() + 4000;
-            while (System.currentTimeMillis() < refreshDeadline && peerModel.isEmpty()) {
+            long peerDeadline = System.currentTimeMillis() + 8000;
+            while (System.currentTimeMillis() < peerDeadline && peerModel.size() < 2) {
                 Thread.sleep(100);
             }
+            if (peerModel.size() < 2) {
+                throw new AssertionError("Both Bob and Charlie should be discovered by tracker; found: " + peerModel.size());
+            }
 
-            // Ensure we have Bob and a long Unicode peer for row measurement
-            SwingUtilities.invokeAndWait(() -> {
-                if (peerModel.isEmpty()) {
-                    peerModel.addElement(new PeerInfo("bob-smoke", "Bob Secondary", "127.0.0.1", bobPort));
-                }
-                peerModel.addElement(new PeerInfo(
-                        "peer-long-unicode-id-0123456789",
-                        "Nguyễn Văn A 🌟 [VN-HCM - Test Long Display Name]",
-                        "long-hostname.dynamic-dns.internal.example.org",
-                        65535
-                ));
-            });
-            robot.waitForIdle();
-            Thread.sleep(200);
-
-            // Verify both list rows have non-overlapping, disjoint text lines
+            // Verify both list rows have non-overlapping text lines on EDT
             SwingUtilities.invokeAndWait(() -> {
                 for (int i = 0; i < peerModel.size(); i++) {
                     Rectangle cellBounds = peerList.getCellBounds(i, i);
@@ -375,9 +378,9 @@ public class DesktopUiSmoke {
                         if (nameLbl != null && epLbl != null) {
                             Rectangle nameRect = nameLbl.getBounds();
                             Rectangle epRect = epLbl.getBounds();
-                            System.out.println("  Peer [" + i + "] Name Rect: " + nameRect + " | Endpoint Rect: " + epRect + " inside " + cellBounds);
+                            System.out.println("  Peer [" + i + "] Name Rect: " + nameRect + " | Endpoint Rect: " + epRect);
                             if (nameRect.intersects(epRect)) {
-                                throw new AssertionError("Name and endpoint labels overlap vertically in peer row " + i + "! Name: " + nameRect + ", Ep: " + epRect);
+                                throw new AssertionError("Name and endpoint labels overlap in peer row " + i);
                             }
                             if (nameRect.y + nameRect.height > epRect.y) {
                                 throw new AssertionError("Name label bottom exceeds endpoint top in peer row " + i);
@@ -387,11 +390,8 @@ public class DesktopUiSmoke {
                 }
             });
 
-            // -----------------------------------------------------------------
-            // 4. Action Verification & Real File Transfer
-            // -----------------------------------------------------------------
-            System.out.println("[DesktopUiSmoke] Testing action state transitions and transfer...");
-            // No selection -> sendButton disabled
+            // 4. File Transfer with Real Visible Prompt Acceptance
+            System.out.println("[DesktopUiSmoke] Testing action state transitions and transfer with visible prompt...");
             SwingUtilities.invokeAndWait(peerList::clearSelection);
             robot.waitForIdle();
             if (sendBtn.isEnabled()) {
@@ -399,38 +399,73 @@ public class DesktopUiSmoke {
             }
 
             // Select Bob
-            SwingUtilities.invokeAndWait(() -> peerList.setSelectedIndex(0));
+            int bobIdx = -1;
+            PeerInfo bobInfo = null;
+            for (int i = 0; i < peerModel.size(); i++) {
+                if ("bob-smoke".equals(peerModel.get(i).peerId())) {
+                    bobIdx = i;
+                    bobInfo = peerModel.get(i);
+                    break;
+                }
+            }
+            if (bobInfo == null) {
+                throw new AssertionError("Bob peer not found in peer model");
+            }
+            final int finalBobIdx = bobIdx;
+            SwingUtilities.invokeAndWait(() -> peerList.setSelectedIndex(finalBobIdx));
             robot.waitForIdle();
             if (!sendBtn.isEnabled()) {
                 throw new AssertionError("Send button must be enabled when a peer is selected");
             }
 
-            // Create a deterministic multi-chunk test file
             Path testFile = aliceShared.resolve("sample-transfer.dat");
-            byte[] fileData = new byte[45000]; // 45 KB = ~3 chunks of 16 KB
+            byte[] fileData = new byte[45000];
             for (int i = 0; i < fileData.length; i++) {
                 fileData[i] = (byte) (i % 251);
             }
             Files.write(testFile, fileData);
             String expectedHash = HashUtil.sha256(testFile);
 
-            // Initiate send to Bob directly through runtime
-            System.out.println("  Sending multi-chunk file to Bob (" + expectedHash + ")...");
-            PeerInfo bobInfo = null;
-            for (int i = 0; i < peerModel.size(); i++) {
-                if ("bob-smoke".equals(peerModel.get(i).peerId())) {
-                    bobInfo = peerModel.get(i);
-                    final int bobIdx = i;
-                    SwingUtilities.invokeAndWait(() -> peerList.setSelectedIndex(bobIdx));
-                    break;
+            // Supervisor thread to accept the real visible prompt dialog for Bob
+            AtomicBoolean acceptHandled = new AtomicBoolean(false);
+            Thread promptAcceptor = new Thread(() -> {
+                try {
+                    long pDeadline = System.currentTimeMillis() + 8000;
+                    while (System.currentTimeMillis() < pDeadline) {
+                        for (Window w : Window.getWindows()) {
+                            if (w instanceof JDialog d && d.isShowing() && "Incoming file".equals(d.getTitle())) {
+                                System.out.println("  [promptAcceptor] Found dialog: " + d.getTitle());
+                                JButton acceptBtn = findButton(d, "Accept");
+                                if (acceptBtn != null && acceptBtn.isShowing()) {
+                                    SwingUtilities.invokeAndWait(() -> {
+                                        d.toFront();
+                                        d.requestFocus();
+                                        acceptBtn.requestFocusInWindow();
+                                    });
+                                    Thread.sleep(100);
+                                    clickComponent(robot, acceptBtn);
+                                    robot.waitForIdle();
+                                    if (acceptBtn.isShowing()) {
+                                        robot.keyPress(KeyEvent.VK_SPACE);
+                                        robot.delay(40);
+                                        robot.keyRelease(KeyEvent.VK_SPACE);
+                                    }
+                                    acceptHandled.set(true);
+                                    return;
+                                }
+                            }
+                        }
+                        Thread.sleep(50);
+                    }
+                    System.out.println("  [promptAcceptor] Timed out waiting for dialog");
+                } catch (Exception ex) {
+                    System.err.println("  [promptAcceptor] Error: " + ex.getMessage());
                 }
-            }
-            if (bobInfo == null) {
-                bobInfo = new PeerInfo("bob-smoke", "Bob Secondary", "127.0.0.1", bobPort);
-            }
+            }, "prompt-acceptor");
+            promptAcceptor.start();
+
             runtimeAlice.sendFile(bobInfo, testFile);
 
-            // Wait for transfer to complete on Alice's side
             long transferDeadline = System.currentTimeMillis() + 15000;
             boolean completed = false;
             while (System.currentTimeMillis() < transferDeadline) {
@@ -438,6 +473,7 @@ public class DesktopUiSmoke {
                 int rows = transferTable.getRowCount();
                 if (rows > 0) {
                     Object statusObj = transferTable.getValueAt(0, 6);
+                    System.out.println("  [transfer loop] row 0 status: " + statusObj);
                     if (statusObj != null && statusObj.toString().toLowerCase().contains("completed")) {
                         completed = true;
                         break;
@@ -450,24 +486,40 @@ public class DesktopUiSmoke {
             }
             System.out.println("  Transfer completed successfully!");
 
-            // Verify received file at Bob
             Path receivedAtBob = bobDown.resolve("sample-transfer.dat");
             if (!Files.exists(receivedAtBob)) {
                 throw new AssertionError("Transferred file does not exist at Bob: " + receivedAtBob);
             }
             String actualHash = HashUtil.sha256(receivedAtBob);
             if (!expectedHash.equals(actualHash)) {
-                throw new AssertionError("SHA-256 hash mismatch! Expected: " + expectedHash + ", actual: " + actualHash);
+                throw new AssertionError("SHA-256 mismatch: expected " + expectedHash + ", got " + actualHash);
             }
             System.out.println("  Verified SHA-256 matches: " + actualHash);
 
-            // -----------------------------------------------------------------
-            // 5. Test Rejected Offer
-            // -----------------------------------------------------------------
-            System.out.println("[DesktopUiSmoke] Testing rejected file offer...");
-            bobAutoAccept.set(false);
+            // 5. Test Rejected Offer with Escape key
+            System.out.println("[DesktopUiSmoke] Testing rejected file offer via Escape key...");
             Path rejectFile = aliceShared.resolve("reject-me.txt");
             Files.writeString(rejectFile, "reject this content");
+
+            Thread promptRejector = new Thread(() -> {
+                try {
+                    long pDeadline = System.currentTimeMillis() + 8000;
+                    while (System.currentTimeMillis() < pDeadline) {
+                        for (Window w : Window.getWindows()) {
+                            if (w instanceof JDialog d && d.isShowing() && "Incoming file".equals(d.getTitle())) {
+                                Thread.sleep(100);
+                                robot.keyPress(KeyEvent.VK_ESCAPE);
+                                robot.delay(40);
+                                robot.keyRelease(KeyEvent.VK_ESCAPE);
+                                return;
+                            }
+                        }
+                        Thread.sleep(50);
+                    }
+                } catch (Exception ignored) {}
+            }, "prompt-rejector");
+            promptRejector.start();
+
             runtimeAlice.sendFile(bobInfo, rejectFile);
 
             long rejectDeadline = System.currentTimeMillis() + 10000;
@@ -490,59 +542,54 @@ public class DesktopUiSmoke {
             }
             System.out.println("  Rejected transfer observed correctly.");
 
-            // -----------------------------------------------------------------
-            // 6. Catalogue Search & Activity Log Verification
-            // -----------------------------------------------------------------
-            System.out.println("[DesktopUiSmoke] Testing Catalogue Search tab...");
+            // 6. Catalogue Search & Local Sharing Strip
+            System.out.println("[DesktopUiSmoke] Testing Catalogue Search tab and Local Sharing Strip...");
             JTabbedPane tabs = (JTabbedPane) getFieldValue(frame, "tabbedPane");
-            SwingUtilities.invokeAndWait(() -> tabs.setSelectedIndex(1)); // Switch to Catalogue Search
+            SwingUtilities.invokeAndWait(() -> tabs.setSelectedIndex(1));
             robot.waitForIdle();
-            Thread.sleep(150);
+            Thread.sleep(200);
 
+            JButton rescanBtn = (JButton) getFieldValue(frame, "rescanButton");
             JTextField searchField = (JTextField) getFieldValue(frame, "searchField");
             JButton searchBtn = (JButton) getFieldValue(frame, "searchButton");
             JButton downloadBtn = (JButton) getFieldValue(frame, "downloadButton");
             JTable searchTable = (JTable) getFieldValue(frame, "searchTable");
 
-            var directResults = runtimeAlice.searchFiles("shared-catalogue-item.txt");
-            System.out.println("  Direct search result count: " + directResults.size());
-
+            // Click Rescan shared folder and verify outcome
+            clickComponent(robot, rescanBtn);
+            robot.waitForIdle();
+            JTextArea sharingStatus = (JTextArea) getFieldValue(frame, "sharingStatusArea");
+            long rescanDeadline = System.currentTimeMillis() + 6000;
+            while (System.currentTimeMillis() < rescanDeadline) {
+                if (sharingStatus.getText().contains("up to date")) break;
+                Thread.sleep(50);
+            }
+            if (!sharingStatus.getText().contains("up to date")) {
+                throw new AssertionError("Rescan did not reach up to date status: " + sharingStatus.getText());
+            }
+            // Search catalogue
             SwingUtilities.invokeAndWait(() -> {
-                frame.toFront();
                 searchField.requestFocusInWindow();
                 searchField.setText("shared-catalogue-item.txt");
             });
             robot.waitForIdle();
             clickComponent(robot, searchBtn);
             robot.waitForIdle();
-            long searchDeadline = System.currentTimeMillis() + 5000;
+
+            long searchDeadline = System.currentTimeMillis() + 6000;
             while (System.currentTimeMillis() < searchDeadline && searchTable.getRowCount() == 0) {
                 Thread.sleep(100);
             }
             if (searchTable.getRowCount() == 0) {
-                SwingUtilities.invokeAndWait(frame::performSearch);
-                long secondDeadline = System.currentTimeMillis() + 4000;
-                while (System.currentTimeMillis() < secondDeadline && searchTable.getRowCount() == 0) {
-                    Thread.sleep(100);
-                }
-            }
-            if (searchTable.getRowCount() == 0) {
                 throw new AssertionError("Catalogue search returned 0 results for shared-catalogue-item.txt");
             }
+
             // Select search result row
-            JTextArea searchDetail = (JTextArea) getFieldValue(frame, "searchDetailText");
-            SwingUtilities.invokeAndWait(() -> {
-                if (searchTable.getRowCount() > 0) {
-                    searchTable.setRowSelectionInterval(0, 0);
-                }
-            });
+            SwingUtilities.invokeAndWait(() -> searchTable.setRowSelectionInterval(0, 0));
             robot.waitForIdle();
+            Thread.sleep(200);
 
-            long detailDeadline = System.currentTimeMillis() + 3000;
-            while (System.currentTimeMillis() < detailDeadline && searchDetail.getText().isBlank()) {
-                Thread.sleep(50);
-            }
-
+            JTextArea searchDetail = (JTextArea) getFieldValue(frame, "searchDetailText");
             String detailText = searchDetail.getText();
             if (!detailText.contains("shared-catalogue-item.txt") || !detailText.contains(bobFileId)) {
                 throw new AssertionError("Search details missing expected filename or SHA-256 hash");
@@ -551,9 +598,43 @@ public class DesktopUiSmoke {
                 throw new AssertionError("Download Selected button should be enabled for selected search result");
             }
 
-            // Test Activity Log
+            // Click Download Selected and verify download completes
+            clickComponent(robot, downloadBtn);
+            robot.waitForIdle();
+            SwingUtilities.invokeAndWait(() -> tabs.setSelectedIndex(0));
+            robot.waitForIdle();
+            long dlDeadline = System.currentTimeMillis() + 15000;
+            boolean dlCompleted = false;
+            while (System.currentTimeMillis() < dlDeadline) {
+                JTable transferTable = (JTable) getFieldValue(frame, "transfersTable");
+                int rows = transferTable.getRowCount();
+                for (int r = 0; r < rows; r++) {
+                    Object fileObj = transferTable.getValueAt(r, 1);
+                    Object statusObj = transferTable.getValueAt(r, 6);
+                    if (fileObj != null && fileObj.toString().contains("shared-catalogue-item.txt")
+                            && statusObj != null && statusObj.toString().toLowerCase().contains("completed")) {
+                        dlCompleted = true;
+                        break;
+                    }
+                }
+                if (dlCompleted) break;
+                Thread.sleep(100);
+            }
+            if (!dlCompleted) {
+                throw new AssertionError("Download Selected did not reach Completed status within 15 seconds");
+            }
+            Path downloadedFile = aliceDown.resolve("shared-catalogue-item.txt");
+            if (!Files.exists(downloadedFile)) {
+                throw new AssertionError("Downloaded file missing at Alice: " + downloadedFile);
+            }
+            if (!bobFileId.equals(HashUtil.sha256(downloadedFile))) {
+                throw new AssertionError("Downloaded file SHA-256 mismatch");
+            }
+            System.out.println("  Verified download from Catalogue Search completed with SHA-256 match!");
+
+            // 7. Activity Log
             System.out.println("[DesktopUiSmoke] Testing Activity Log tab...");
-            SwingUtilities.invokeAndWait(() -> tabs.setSelectedIndex(2)); // Switch to Activity Log
+            SwingUtilities.invokeAndWait(() -> tabs.setSelectedIndex(2));
             robot.waitForIdle();
             Thread.sleep(150);
 
@@ -562,22 +643,21 @@ public class DesktopUiSmoke {
             if (logArea.getText().isBlank()) {
                 throw new AssertionError("Activity Log must contain transfer events");
             }
-
             clickComponent(robot, clearLogBtn);
             robot.waitForIdle();
             Thread.sleep(150);
             if (!logArea.getText().isEmpty()) {
-                SwingUtilities.invokeAndWait(clearLogBtn::doClick);
+                System.out.println("  [debug] logArea content after click: '" + logArea.getText() + "'");
+                clickComponent(robot, clearLogBtn);
                 robot.waitForIdle();
+                Thread.sleep(150);
             }
             if (!logArea.getText().isEmpty()) {
-                throw new AssertionError("Activity Log must be empty after clicking Clear Log");
+                throw new AssertionError("Activity Log must be empty after clicking Clear Log. Found: " + logArea.getText());
             }
 
-            // -----------------------------------------------------------------
-            // 7. Settings Dialog & Form Layout Verification
-            // -----------------------------------------------------------------
-            System.out.println("[DesktopUiSmoke] Verifying SettingsDialog geometry and footers...");
+            // 8. Settings Dialog with Unsaved Settings Guard
+            System.out.println("[DesktopUiSmoke] Verifying SettingsDialog geometry, advanced section, and discard guard...");
             JButton settingsBtn = (JButton) getFieldValue(frame, "settingsButton");
             clickComponent(robot, settingsBtn);
             robot.waitForIdle();
@@ -589,42 +669,96 @@ public class DesktopUiSmoke {
             }
             captureScreenshot(robot, settingsDialog, screenshotDir.resolve("03-settings-dialog.png"));
 
-            // Verify advanced section toggle
             JButton toggleAdv = (JButton) getFieldValue(settingsDialog, "toggleAdvancedBtn");
             JPanel advPanel = (JPanel) getFieldValue(settingsDialog, "advancedPanel");
             if (advPanel.isVisible()) {
                 throw new AssertionError("Advanced panel must be initially collapsed");
             }
-
             clickComponent(robot, toggleAdv);
             robot.waitForIdle();
             Thread.sleep(150);
             if (!advPanel.isVisible()) {
-                SwingUtilities.invokeAndWait(toggleAdv::doClick);
-                robot.waitForIdle();
-            }
-            if (!advPanel.isVisible()) {
-                throw new AssertionError("Advanced panel must be visible after clicking toggle button");
+                throw new AssertionError("Advanced panel must be visible after clicking toggle");
             }
 
-            // Verify footer buttons are visible and not clipped
-            JButton saveBtn = (JButton) getFieldValue(settingsDialog, "saveButton");
-            JButton closeBtn = (JButton) getFieldValue(settingsDialog, "closeButton");
-            if (!saveBtn.isShowing() || !closeBtn.isShowing()) {
-                throw new AssertionError("SettingsDialog footer buttons (Save/Close) must be showing");
-            }
+            // Edit field to create unsaved changes
+            JTextField nameField = (JTextField) getFieldValue(settingsDialog, "displayNameField");
+            SwingUtilities.invokeAndWait(() -> nameField.setText("Alice Modified Name"));
+            robot.waitForIdle();
 
-            // Close SettingsDialog via escape key
+            // Press Escape: triggers Unsaved settings confirmation dialog
+            AtomicBoolean keepEditingObserved = new AtomicBoolean(false);
+            Thread dismissPromptThread = new Thread(() -> {
+                try {
+                    long dDeadline = System.currentTimeMillis() + 4000;
+                    while (System.currentTimeMillis() < dDeadline) {
+                        for (Window w : Window.getWindows()) {
+                            if (w instanceof JDialog d && d.isShowing() && "Unsaved settings".equals(d.getTitle())) {
+                                keepEditingObserved.set(true);
+                                robot.keyPress(KeyEvent.VK_ENTER);
+                                robot.delay(40);
+                                robot.keyRelease(KeyEvent.VK_ENTER);
+                                return;
+                            }
+                        }
+                        Thread.sleep(50);
+                    }
+                } catch (Exception ignored) {}
+            });
+            dismissPromptThread.start();
+
             robot.keyPress(KeyEvent.VK_ESCAPE);
             robot.delay(50);
             robot.keyRelease(KeyEvent.VK_ESCAPE);
             robot.waitForIdle();
-            Thread.sleep(200);
+            dismissPromptThread.join(4000);
 
-            // -----------------------------------------------------------------
-            // 8. Software Updates Dialog & Presentation Snapshot Verification
-            // -----------------------------------------------------------------
-            System.out.println("[DesktopUiSmoke] Verifying UpdateDialog presentation states...");
+            if (!keepEditingObserved.get()) {
+                throw new AssertionError("Unsaved settings confirmation was not observed on Escape");
+            }
+            if (!settingsDialog.isShowing()) {
+                throw new AssertionError("SettingsDialog must remain visible when user chooses Keep editing");
+            }
+            if (!"Alice Modified Name".equals(nameField.getText())) {
+                throw new AssertionError("Draft edits must be preserved after Keep editing");
+            }
+
+            // Now close with Discard changes
+            AtomicBoolean discardObserved = new AtomicBoolean(false);
+            Thread discardPromptThread = new Thread(() -> {
+                try {
+                    long dDeadline = System.currentTimeMillis() + 4000;
+                    while (System.currentTimeMillis() < dDeadline) {
+                        for (Window w : Window.getWindows()) {
+                            if (w instanceof JDialog d && d.isShowing() && "Unsaved settings".equals(d.getTitle())) {
+                                JButton discardBtn = findButton(d, "Discard changes");
+                                if (discardBtn != null && discardBtn.isShowing()) {
+                                    clickComponent(robot, discardBtn);
+                                    discardObserved.set(true);
+                                    return;
+                                }
+                            }
+                        }
+                        Thread.sleep(50);
+                    }
+                } catch (Exception ignored) {}
+            });
+            discardPromptThread.start();
+
+            JButton closeBtn = (JButton) getFieldValue(settingsDialog, "closeButton");
+            clickComponent(robot, closeBtn);
+            robot.waitForIdle();
+            discardPromptThread.join(4000);
+
+            if (!discardObserved.get()) {
+                throw new AssertionError("Unsaved settings confirmation was not observed on Close button");
+            }
+            if (settingsDialog.isShowing()) {
+                throw new AssertionError("SettingsDialog must be closed after choosing Discard changes");
+            }
+
+            // 9. Software Updates Dialog & Complete Presentation States (11 states)
+            System.out.println("[DesktopUiSmoke] Verifying UpdateDialog all 11 presentation states...");
             JButton updateBtn = (JButton) getFieldValue(frame, "updateButton");
             clickComponent(robot, updateBtn);
             robot.waitForIdle();
@@ -636,37 +770,37 @@ public class DesktopUiSmoke {
             }
             captureScreenshot(robot, updateDialog, screenshotDir.resolve("04-update-dialog.png"));
 
-            // Inject snapshot states to verify label fitting and visibility
             Method applySnapshotMethod = UpdateDialog.class.getDeclaredMethod("applySnapshot", UpdateService.UpdateSnapshot.class);
             applySnapshotMethod.setAccessible(true);
 
-            List<UpdateService.UpdateState> testStates = List.of(
-                    UpdateService.UpdateState.NOT_CHECKED,
-                    UpdateService.UpdateState.CHECKING,
-                    UpdateService.UpdateState.UP_TO_DATE,
-                    UpdateService.UpdateState.NO_RELEASE,
-                    UpdateService.UpdateState.UPDATE_AVAILABLE,
-                    UpdateService.UpdateState.DOWNLOADING,
-                    UpdateService.UpdateState.VERIFYING,
-                    UpdateService.UpdateState.READY_TO_RESTART,
-                    UpdateService.UpdateState.FAILED
-            );
-
+            List<UpdateService.UpdateState> all11States = Arrays.asList(UpdateService.UpdateState.values());
             ClientVersion v1 = ClientVersion.parse("1.2.0");
             ClientVersion v2 = ClientVersion.parse("1.3.0");
 
-            for (UpdateService.UpdateState st : testStates) {
+            for (UpdateService.UpdateState st : all11States) {
                 UpdateService.UpdateSnapshot snap = new UpdateService.UpdateSnapshot(
-                        st, v1, v2, 524288L, 1048576L, "Sample detail for state " + st + " with wrapped text.", "Release notes text.", null, null
+                        st, v1, v2, 524288L, 1048576L,
+                        "Detailed status description for state " + st + " verifying text wrapping and metrics across all display scales.",
+                        "Release notes text.", null, null
                 );
                 SwingUtilities.invokeAndWait(() -> {
                     try {
                         applySnapshotMethod.invoke(updateDialog, snap);
+                        JLabel statusLbl = (JLabel) getFieldValue(updateDialog, "statusLabel");
+                        JTextArea detailArea = (JTextArea) getFieldValue(updateDialog, "detailLabel");
+                        if (statusLbl.getText().isBlank() || detailArea.getText().isBlank()) {
+                            throw new AssertionError("Status or detail empty for state " + st);
+                        }
                     } catch (Exception ex) {
                         throw new RuntimeException(ex);
                     }
                 });
                 robot.waitForIdle();
+                if (st == UpdateService.UpdateState.UPDATE_AVAILABLE) {
+                    captureScreenshot(robot, updateDialog, screenshotDir.resolve("04-update-dialog-available.png"));
+                } else if (st == UpdateService.UpdateState.READY_TO_RESTART) {
+                    captureScreenshot(robot, updateDialog, screenshotDir.resolve("04-update-dialog-restart.png"));
+                }
             }
 
             // Close UpdateDialog
@@ -676,118 +810,104 @@ public class DesktopUiSmoke {
             robot.waitForIdle();
             Thread.sleep(200);
 
-            // -----------------------------------------------------------------
-            // 9. Incoming File Offer Prompt Geometry
-            // -----------------------------------------------------------------
-            String promptHash = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-            int promptChunkSize = 16384;
-            long promptFileSize = 65536L;
-            long promptChunks = promptFileSize / promptChunkSize;
-            FileMetadata promptMeta = new FileMetadata(
-                    java.util.UUID.randomUUID().toString(),
-                    promptHash,
-                    "long-test-filename-with-extended-description-for-layout-inspection-2026.iso",
-                    promptFileSize,
-                    promptChunkSize,
-                    promptChunks,
-                    promptHash,
-                    "Sender With Very Long Display Name To Ensure No Horizontal Overflow"
-            );
-            SwingIncomingFilePrompt prompt = new SwingIncomingFilePrompt(frame);
+            // 10. Tracker Outage & Offline Peer Resilience
+            System.out.println("[DesktopUiSmoke] Verifying Tracker Outage resilience and recovery...");
+            TrackerServer t = trackerRef.getAndSet(null);
+            if (t != null) t.close();
 
-            CompletableFuture<Boolean> promptDecision = CompletableFuture.supplyAsync(() ->
-                    prompt.accept(promptMeta, new InetSocketAddress("192.168.1.100", 65535), 30000)
-            );
-
-            Thread.sleep(500);
-            robot.waitForIdle();
-
-            // Find prompt dialog
-            JDialog promptDialog = null;
-            for (Window w : Window.getWindows()) {
-                if (w instanceof JDialog d && d.isShowing() && "Incoming file".equals(d.getTitle())) {
-                    promptDialog = d;
+            long outageDeadline = System.currentTimeMillis() + 10000;
+            while (System.currentTimeMillis() < outageDeadline) {
+                if (runtimeAlice.snapshot().trackerState() == PeerRuntime.TrackerState.OFFLINE) {
                     break;
                 }
+                Thread.sleep(100);
             }
-
-            if (promptDialog == null) {
-                throw new AssertionError("Incoming file prompt dialog was not found on screen");
-            }
-
-            captureScreenshot(robot, promptDialog, screenshotDir.resolve("05-incoming-offer-dialog.png"));
-
-            // Dismiss prompt dialog via escape (Reject)
-            long pressTime = System.currentTimeMillis();
-            robot.keyPress(KeyEvent.VK_ESCAPE);
-            robot.delay(50);
-            robot.keyRelease(KeyEvent.VK_ESCAPE);
             robot.waitForIdle();
+            Thread.sleep(300);
 
-            boolean decision = promptDecision.get(4, TimeUnit.SECONDS);
-            long elapsed = System.currentTimeMillis() - pressTime;
-            if (decision) {
-                throw new AssertionError("Dismissed incoming prompt must resolve to false (Reject)");
+            captureScreenshot(robot, frame, screenshotDir.resolve("06-main-window-offline.png"));
+
+            JTextArea peerStatus = (JTextArea) getFieldValue(frame, "peerStatusArea");
+            String peerStatusText = peerStatus.getText();
+            if (!peerStatusText.contains("Tracker unavailable")) {
+                throw new AssertionError("Peer status area must show tracker unavailable wording during outage: " + peerStatusText);
             }
-            if (elapsed >= 10000) {
-                throw new AssertionError("Prompt resolved too slowly (" + elapsed + "ms); likely timed out rather than handling Escape");
+
+            // Cached peers survive
+            if (peerModel.isEmpty()) {
+                throw new AssertionError("Cached peers must remain visible in peer list during outage");
             }
-            final JDialog dlg = promptDialog;
-            boolean[] stillShowing = new boolean[1];
-            SwingUtilities.invokeAndWait(() -> stillShowing[0] = dlg.isShowing());
-            if (stillShowing[0]) {
-                throw new AssertionError("Incoming prompt dialog must not be showing after Escape");
-            }
-            System.out.println("  Incoming prompt rejected via Escape in " + elapsed + "ms.");
-            System.out.println("[DesktopUiSmoke] All UI sections successfully exercised and verified at scale " + scale + ".");
+
+            System.out.println("[DesktopUiSmoke] All UI journeys verified successfully at scale " + scale + ".");
         } finally {
             SwingUtilities.invokeLater(() -> {
                 for (Window w : Window.getWindows()) {
                     w.dispose();
                 }
             });
-            updateService.close();
-            runtimeAlice.close();
-            runtimeBob.close();
-            tracker.close();
+            try { runtimeAlice.close(); } catch (Exception ignored) {}
+            try { runtimeBob.close(); } catch (Exception ignored) {}
+            try { runtimeCharlie.close(); } catch (Exception ignored) {}
+            TrackerServer t2 = trackerRef.getAndSet(null);
+            if (t2 != null) {
+                try { t2.close(); } catch (Exception ignored) {}
+            }
         }
     }
 
-    private static void clickComponent(Robot robot, AbstractButton comp) throws Exception {
+    private static void clickComponent(Robot robot, Component comp) throws Exception {
+        Point[] centerOnScreen = new Point[1];
         SwingUtilities.invokeAndWait(() -> {
             Window w = SwingUtilities.getWindowAncestor(comp);
             if (w != null) {
                 w.toFront();
                 w.requestFocus();
             }
-            comp.scrollRectToVisible(new Rectangle(0, 0, Math.max(1, comp.getWidth()), Math.max(1, comp.getHeight())));
-            comp.requestFocusInWindow();
-        });
-        Thread.sleep(60);
-        Point[] loc = new Point[1];
-        Dimension[] dim = new Dimension[1];
-        SwingUtilities.invokeAndWait(() -> {
-            try {
-                loc[0] = comp.getLocationOnScreen();
-                dim[0] = comp.getSize();
-            } catch (Exception ignored) {
+            if (comp instanceof JComponent jc) {
+                jc.scrollRectToVisible(new Rectangle(0, 0, Math.max(1, jc.getWidth()), Math.max(1, jc.getHeight())));
             }
+            if (!comp.isShowing()) {
+                throw new IllegalStateException("Component is not showing on screen: " + comp);
+            }
+            comp.requestFocusInWindow();
+            Point loc = comp.getLocationOnScreen();
+            Dimension size = comp.getSize();
+            centerOnScreen[0] = new Point(loc.x + size.width / 2, loc.y + size.height / 2);
         });
 
-        if (loc[0] == null || dim[0] == null || !comp.isShowing()) {
-            throw new IllegalStateException("Component is not visible on screen: " + comp.getText());
-        }
-
-        int targetX = loc[0].x + dim[0].width / 2;
-        int targetY = loc[0].y + dim[0].height / 2;
-
-        robot.mouseMove(targetX, targetY);
-        robot.delay(60);
+        Point pt = centerOnScreen[0];
+        robot.mouseMove(pt.x, pt.y);
+        robot.delay(80);
         robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
-        robot.delay(60);
+        robot.delay(80);
         robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
-        robot.delay(100);
         robot.waitForIdle();
+    }
+
+    private static JButton findButton(Container container, String textSubstring) {
+        for (Component c : container.getComponents()) {
+            if (c instanceof JButton b && b.getText() != null && b.getText().contains(textSubstring)) {
+                return b;
+            } else if (c instanceof Container sub) {
+                JButton found = findButton(sub, textSubstring);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static JLabel findLabel(Container container, String textSubstring) {
+        for (Component c : container.getComponents()) {
+            if (c instanceof JLabel l) {
+                if (l.getText() != null && l.getText().contains(textSubstring)) {
+                    return l;
+                }
+            } else if (c instanceof Container sub) {
+                JLabel found = findLabel(sub, textSubstring);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private static void captureScreenshot(Robot robot, Window window, Path destination) {
@@ -815,6 +935,7 @@ public class DesktopUiSmoke {
             System.err.println("  Warning: could not capture screenshot to " + destination + ": " + ex.getMessage());
         }
     }
+
     private static Object getFieldValue(Object obj, String fieldName) throws Exception {
         Class<?> clazz = obj.getClass();
         while (clazz != null) {
@@ -827,19 +948,5 @@ public class DesktopUiSmoke {
             }
         }
         throw new NoSuchFieldException("Field " + fieldName + " not found on " + obj.getClass());
-    }
-
-    private static JLabel findLabel(Container container, String textSubstring) {
-        for (Component c : container.getComponents()) {
-            if (c instanceof JLabel l) {
-                if (l.getText() != null && l.getText().contains(textSubstring)) {
-                    return l;
-                }
-            } else if (c instanceof Container sub) {
-                JLabel found = findLabel(sub, textSubstring);
-                if (found != null) return found;
-            }
-        }
-        return null;
     }
 }

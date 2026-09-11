@@ -212,7 +212,7 @@ public final class SwingIncomingFilePrompt implements IncomingFilePrompt {
         senderVal.setWrapStyleWord(true);
         senderVal.setOpaque(false);
         senderVal.putClientProperty("html.disable", Boolean.TRUE);
-
+        panel.add(senderVal, gbc);
         // Size
         gbc.gridy = 4;
         gbc.gridx = 0;

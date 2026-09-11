@@ -38,9 +38,15 @@ import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.UIManager;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.TableColumn;
 import javax.swing.table.TableColumnModel;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.function.Consumer;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
 import java.awt.Color;
@@ -105,11 +111,19 @@ public final class MainFrame extends JFrame implements TransferListener {
     private final JPanel peerListCardPanel = new JPanel(peerListCardLayout);
     private final JLabel peerEmptyTitle = new JLabel("No peers listed");
     private final JTextArea peerEmptySubtitle = createWrappingLabel("Start another peer, then refresh.");
+    private final JTextArea peerStatusArea = createWrappingLabel("Connecting to tracker...");
     private final JButton refreshButton = new JButton("Refresh peers");
     private final JButton sendButton = new JButton("Send file...");
     private final JPopupMenu peerPopupMenu = new JPopupMenu();
     private final JMenuItem sendMenuItem = new JMenuItem("Send file...");
     private JSplitPane mainSplit;
+
+    // Sharing strip controls
+    private final JTextField sharedDirPathField = new JTextField();
+    private final JTextArea sharingStatusArea = createWrappingLabel("Initializing shared folder...");
+    private final JButton rescanButton = new JButton("Rescan shared folder");
+    private volatile boolean rescanning = false;
+    private final JLabel searchHeaderLabel = new JLabel();
 
     // Workspace tabbed pane
     private final JTabbedPane tabbedPane = new JTabbedPane();
@@ -145,12 +159,15 @@ public final class MainFrame extends JFrame implements TransferListener {
     private boolean refreshing = false;
     private boolean searching = false;
     private long searchSequence = 0;
+    private String lastSuccessfulQuery = null;
+    private long lastSeenSnapshotRevision = -1L;
+    private PeerRuntime.TrackerState lastObservedTrackerState = null;
+    private final Consumer<PeerRuntime.RuntimeSnapshot> snapshotListener;
     private boolean ignoreThemeEvents = false;
     private boolean stopped = false;
     private boolean restartFrozen = false;
     private PeerListCellRenderer peerRenderer;
     private final Runnable themeListener = this::onThemeChanged;
-
     public MainFrame(
             PeerRuntime runtime,
             vn.edu.p2p.peer.config.ConfigStore configStore,
@@ -162,7 +179,11 @@ public final class MainFrame extends JFrame implements TransferListener {
         this.configStore = java.util.Objects.requireNonNull(configStore, "configStore cannot be null");
         this.updateService = java.util.Objects.requireNonNull(updateService, "updateService cannot be null");
         this.restartCoordinator = restartCoordinator;
+        this.snapshotListener = snapshot -> {
+            SwingUtilities.invokeLater(() -> onRuntimeSnapshot(snapshot));
+        };
         buildUi();
+        runtime.addStateListener(snapshotListener);
         wireUpdateListener();
         DesktopTheme.addThemeChangeListener(themeListener);
     }
@@ -329,16 +350,20 @@ public final class MainFrame extends JFrame implements TransferListener {
 
         // Header caption
         JPanel topHeader = new JPanel(new BorderLayout(0, UIScale.scale(2)));
-        JLabel title = new JLabel("Online peers");
+        JLabel title = new JLabel("Peers");
         title.putClientProperty("FlatLaf.styleClass", "h4");
         title.putClientProperty("html.disable", Boolean.TRUE);
 
-        JLabel caption = new JLabel("Last refresh only");
-        caption.putClientProperty("FlatLaf.styleClass", "muted");
-        caption.putClientProperty("html.disable", Boolean.TRUE);
+        peerStatusArea.setEditable(false);
+        peerStatusArea.setFocusable(false);
+        peerStatusArea.setOpaque(false);
+        peerStatusArea.setLineWrap(true);
+        peerStatusArea.setWrapStyleWord(true);
+        peerStatusArea.putClientProperty("FlatLaf.styleClass", "muted");
+        peerStatusArea.putClientProperty("html.disable", Boolean.TRUE);
 
         topHeader.add(title, BorderLayout.NORTH);
-        topHeader.add(caption, BorderLayout.SOUTH);
+        topHeader.add(peerStatusArea, BorderLayout.SOUTH);
         panel.add(topHeader, BorderLayout.NORTH);
 
         // Center: Peer list with CardLayout (list vs empty)
@@ -547,41 +572,113 @@ public final class MainFrame extends JFrame implements TransferListener {
     private JPanel buildSearchTab() {
         JPanel panel = new JPanel(new BorderLayout(0, 8));
 
-        // Top search bar
-        JPanel topBar = new JPanel(new GridBagLayout());
-        topBar.setBorder(BorderFactory.createEmptyBorder(0, 0, UIScale.scale(4), 0));
-        GridBagConstraints sgbc = new GridBagConstraints();
-        sgbc.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(2), UIScale.scale(4));
+        // Top container: Sharing strip + Search toolbar
+        JPanel topContainer = new JPanel(new GridBagLayout());
+        topContainer.setBorder(BorderFactory.createEmptyBorder(0, 0, UIScale.scale(4), 0));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(UIScale.scale(2), UIScale.scale(4), UIScale.scale(2), UIScale.scale(4));
 
+        // Row 0: Shared folder path
+        JLabel pathLabel = new JLabel("Shared folder:");
+        pathLabel.putClientProperty("html.disable", Boolean.TRUE);
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.anchor = GridBagConstraints.WEST;
+        topContainer.add(pathLabel, gbc);
+
+        sharedDirPathField.setText(runtime.config().sharedDir().toAbsolutePath().normalize().toString());
+        sharedDirPathField.setEditable(false);
+        sharedDirPathField.putClientProperty("html.disable", Boolean.TRUE);
+        gbc.gridx = 1;
+        gbc.gridy = 0;
+        gbc.weightx = 1.0;
+        gbc.gridwidth = 2;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(sharedDirPathField, gbc);
+
+        // Row 1: Sharing status (full width)
+        sharingStatusArea.setEditable(false);
+        sharingStatusArea.setFocusable(false);
+        sharingStatusArea.setOpaque(false);
+        sharingStatusArea.setLineWrap(true);
+        sharingStatusArea.setWrapStyleWord(true);
+        sharingStatusArea.putClientProperty("FlatLaf.styleClass", "muted");
+        sharingStatusArea.putClientProperty("html.disable", Boolean.TRUE);
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(sharingStatusArea, gbc);
+
+        // Row 2: Rescan button + explanation
+        rescanButton.putClientProperty("html.disable", Boolean.TRUE);
+        gbc.gridx = 0;
+        gbc.gridy = 2;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        topContainer.add(rescanButton, gbc);
+
+        JLabel autoShareHint = new JLabel("Stable top-level files are shared automatically.");
+        autoShareHint.putClientProperty("FlatLaf.styleClass", "muted");
+        autoShareHint.putClientProperty("html.disable", Boolean.TRUE);
+        gbc.gridx = 1;
+        gbc.gridy = 2;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(autoShareHint, gbc);
+
+        // Row 3: Separator
+        gbc.gridx = 0;
+        gbc.gridy = 3;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(new JSeparator(SwingConstants.HORIZONTAL), gbc);
+
+        // Row 4: Keyword label + Search field
         JLabel kwLabel = new JLabel("Keyword:");
         kwLabel.setLabelFor(searchField);
         kwLabel.putClientProperty("html.disable", Boolean.TRUE);
-        sgbc.gridx = 0;
-        sgbc.gridy = 0;
-        sgbc.weightx = 0.0;
-        sgbc.fill = GridBagConstraints.NONE;
-        topBar.add(kwLabel, sgbc);
+        gbc.gridx = 0;
+        gbc.gridy = 4;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0.0;
+        gbc.fill = GridBagConstraints.NONE;
+        topContainer.add(kwLabel, gbc);
 
         searchField.putClientProperty("html.disable", Boolean.TRUE);
-        sgbc.gridx = 1;
-        sgbc.weightx = 1.0;
-        sgbc.fill = GridBagConstraints.HORIZONTAL;
-        topBar.add(searchField, sgbc);
+        gbc.gridx = 1;
+        gbc.gridy = 4;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(searchField, gbc);
 
+        // Row 5: Action buttons (Search Catalogue & Download Selected) + searchHeaderLabel
+        JPanel searchButtonsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, UIScale.scale(4), 0));
         searchButton.putClientProperty("html.disable", Boolean.TRUE);
-        sgbc.gridx = 2;
-        sgbc.weightx = 0.0;
-        sgbc.fill = GridBagConstraints.NONE;
-        topBar.add(searchButton, sgbc);
-
         downloadButton.putClientProperty("html.disable", Boolean.TRUE);
         downloadButton.putClientProperty("FlatLaf.styleClass", "primary");
-        sgbc.gridx = 3;
-        sgbc.weightx = 0.0;
-        sgbc.fill = GridBagConstraints.NONE;
-        topBar.add(downloadButton, sgbc);
+        searchButtonsPanel.add(searchButton);
+        searchButtonsPanel.add(downloadButton);
 
-        panel.add(topBar, BorderLayout.NORTH);
+        searchHeaderLabel.putClientProperty("html.disable", Boolean.TRUE);
+        searchHeaderLabel.setVisible(false);
+        searchButtonsPanel.add(searchHeaderLabel);
+
+        gbc.gridx = 0;
+        gbc.gridy = 5;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        topContainer.add(searchButtonsPanel, gbc);
+
+        panel.add(topContainer, BorderLayout.NORTH);
 
         searchTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         searchTable.setFillsViewportHeight(true);
@@ -732,6 +829,84 @@ public final class MainFrame extends JFrame implements TransferListener {
         searchButton.addActionListener(e -> performSearch());
         searchField.addActionListener(e -> performSearch());
         downloadButton.addActionListener(e -> downloadSelected());
+        rescanButton.addActionListener(e -> onRescanSharedFolder());
+
+        searchField.getDocument().addDocumentListener(new DocumentListener() {
+            private void check() {
+                if (searchHeaderLabel.isVisible()) {
+                    String currentText = searchField.getText().trim();
+                    if (!currentText.equals(lastSuccessfulQuery != null ? lastSuccessfulQuery.trim() : "")) {
+                        searchHeaderLabel.setText("Last results for \"" + lastSuccessfulQuery + "\" — does not match edited keyword");
+                    } else {
+                        searchHeaderLabel.setText("Last results for \"" + lastSuccessfulQuery + "\" — tracker unavailable; availability unverified");
+                    }
+                }
+            }
+
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                check();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                check();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                check();
+            }
+        });
+    }
+
+    private void appendActivityLog(String message) {
+        SwingUtilities.invokeLater(() -> {
+            if (logArea.getText().isEmpty()) {
+                logCardLayout.show(logCardPanel, "log");
+            }
+            String ts = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
+            logArea.append("[%s] %s\n".formatted(ts, message));
+            if (logArea.getLineCount() > 500) {
+                try {
+                    int endOffset = logArea.getLineEndOffset(logArea.getLineCount() - 400);
+                    logArea.replaceRange("", 0, endOffset);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+    private void onRescanSharedFolder() {
+        if (rescanning || !canOperate()) return;
+        rescanning = true;
+        sharingStatusArea.setText("Scanning shared folder...");
+        updateActionStates();
+
+        new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                runtime.refreshSharedFiles();
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    get();
+                } catch (Exception ex) {
+                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                    String msg = cause.getMessage() != null && !cause.getMessage().isBlank()
+                            ? cause.getMessage()
+                            : cause.getClass().getSimpleName();
+                    sharingStatusArea.setText("Rescan failed: " + msg);
+                    sharingStatusArea.setForeground(getSemanticColor("P2P.error.foreground", Color.RED));
+                    appendActivityLog("Local shared folder rescan failed: " + msg);
+                } finally {
+                    rescanning = false;
+                    updateActionStates();
+                }
+            }
+        }.execute();
     }
 
     private void onThemeSelectionChanged() {
@@ -826,7 +1001,7 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     public void setStarting(boolean starting) {
         this.starting = starting;
-        subtitleLabel.setText("Peer: " + runtime.config().displayName() + " / " + (starting ? "Starting..." : "Ready"));
+        updateHeaderSubtitle(runtime.snapshot());
         updateActionStates();
     }
 
@@ -840,13 +1015,132 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     private void updateActionStates() {
         boolean operate = canOperate();
+        boolean trackerConnected = runtime.snapshot().trackerState() == PeerRuntime.TrackerState.CONNECTED;
+
         refreshButton.setEnabled(operate && !refreshing);
         boolean sendActive = canSend();
         sendButton.setEnabled(sendActive);
         sendMenuItem.setEnabled(sendActive);
-        searchField.setEnabled(operate);
-        searchButton.setEnabled(operate && !searching);
+
+        rescanButton.setEnabled(!stopped && !restartFrozen && !starting && !rescanning);
+
+        searchField.setEnabled(operate && trackerConnected);
+        searchButton.setEnabled(operate && !searching && trackerConnected);
         downloadButton.setEnabled(operate && !searching && hasUsableSearchResultSelected());
+
+        settingsButton.setEnabled(!stopped && !restartFrozen);
+        updateButton.setEnabled(!stopped && !restartFrozen);
+    }
+
+    private static String formatTime(Instant instant) {
+        if (instant == null) return "recently";
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
+        return formatter.format(instant);
+    }
+
+    private void updateHeaderSubtitle(PeerRuntime.RuntimeSnapshot snap) {
+        if (stopped) {
+            subtitleLabel.setText("Stopped — relaunch manually");
+            subtitleLabel.setForeground(getSemanticColor("P2P.error.foreground", Color.RED));
+            return;
+        }
+        if (restartFrozen) {
+            subtitleLabel.setText("Peer: " + runtime.config().displayName() + " / Restart in progress...");
+            subtitleLabel.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+            return;
+        }
+        if (starting) {
+            subtitleLabel.setText("Peer: " + runtime.config().displayName() + " / Starting...");
+            subtitleLabel.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+            return;
+        }
+
+        String displayName = runtime.config().displayName();
+        switch (snap.trackerState()) {
+            case CONNECTED -> {
+                subtitleLabel.setText("Peer: " + displayName + " / Tracker connected");
+                subtitleLabel.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+            }
+            case RECONNECTING -> {
+                subtitleLabel.setText("Peer: " + displayName + " / Reconnecting to tracker...");
+                subtitleLabel.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+            }
+            case OFFLINE, CLOSED -> {
+                subtitleLabel.setText("Peer: " + displayName + " / Tracker unavailable — direct transfers available");
+                subtitleLabel.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+            }
+        }
+    }
+
+    private void onRuntimeSnapshot(PeerRuntime.RuntimeSnapshot snap) {
+        if (snap.revision() < lastSeenSnapshotRevision) {
+            return;
+        }
+        lastSeenSnapshotRevision = snap.revision();
+
+        if (lastObservedTrackerState != snap.trackerState()) {
+            if (lastObservedTrackerState != null) {
+                appendActivityLog("Tracker state: " + snap.trackerState() + " (" + snap.trackerDetail() + ")");
+            }
+            lastObservedTrackerState = snap.trackerState();
+        }
+        if (snap.trackerState() == PeerRuntime.TrackerState.CONNECTED) {
+            String timeStr = snap.peersUpdatedAt() != null ? formatTime(snap.peersUpdatedAt()) : "recently";
+            peerStatusArea.setText("Last refreshed " + timeStr);
+            peerStatusArea.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+
+            if (!refreshing) {
+                String selectedId = peerList.getSelectedValue() != null ? peerList.getSelectedValue().peerId() : null;
+                peerModel.clear();
+                PeerInfo toReselect = null;
+                for (PeerInfo peer : snap.peers()) {
+                    peerModel.addElement(peer);
+                    if (selectedId != null && selectedId.equals(peer.peerId())) {
+                        toReselect = peer;
+                    }
+                }
+                if (peerModel.isEmpty()) {
+                    peerEmptyTitle.setText("No peers listed");
+                    peerEmptySubtitle.setText("Start another peer, then refresh.");
+                    peerListCardLayout.show(peerListCardPanel, "empty");
+                } else {
+                    peerListCardLayout.show(peerListCardPanel, "list");
+                    if (toReselect != null) {
+                        peerList.setSelectedValue(toReselect, true);
+                    }
+                }
+            }
+        } else {
+            String detail = snap.trackerDetail().isBlank() ? "Tracker unavailable" : snap.trackerDetail();
+            if (!snap.peers().isEmpty()) {
+                String timeStr = snap.peersUpdatedAt() != null ? formatTime(snap.peersUpdatedAt()) : "earlier";
+                peerStatusArea.setText("Tracker unavailable (" + detail + ") — showing last known peers from " + timeStr + ". Direct sends may still work.");
+            } else {
+                peerStatusArea.setText("Tracker unavailable (" + detail + ") — no previously discovered peers. Retrying automatically.");
+            }
+            peerStatusArea.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+        }
+
+        sharingStatusArea.setText(snap.sharingDetail());
+        if (snap.sharingState() == PeerRuntime.SharingState.ERROR) {
+            sharingStatusArea.setForeground(getSemanticColor("P2P.error.foreground", Color.RED));
+        } else if (snap.sharingState() == PeerRuntime.SharingState.PENDING_PUBLISH) {
+            sharingStatusArea.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+        } else {
+            sharingStatusArea.setForeground(getSemanticColor("P2P.muted.foreground", Color.GRAY));
+        }
+
+        if (snap.trackerState() != PeerRuntime.TrackerState.CONNECTED) {
+            if (lastSuccessfulQuery != null && searchModel.getRowCount() > 0) {
+                searchHeaderLabel.setText("Last results for \"" + lastSuccessfulQuery + "\" — tracker unavailable; availability unverified");
+                searchHeaderLabel.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+                searchHeaderLabel.setVisible(true);
+            }
+        } else {
+            searchHeaderLabel.setVisible(false);
+        }
+
+        updateActionStates();
     }
 
     private void updateTableRowHeights() {
@@ -886,8 +1180,17 @@ public final class MainFrame extends JFrame implements TransferListener {
 
     @Override
     public void dispose() {
+        ++searchSequence;
+        runtime.removeStateListener(snapshotListener);
         DesktopTheme.removeThemeChangeListener(themeListener);
         super.dispose();
+    }
+
+    public boolean confirmDiscardUnsavedSettings() {
+        if (settingsDialog != null && settingsDialog.isDisplayable() && settingsDialog.isVisible()) {
+            return settingsDialog.confirmDiscardChanges();
+        }
+        return true;
     }
     private boolean hasUsableSearchResultSelected() {
         int selectedRow = searchTable.getSelectedRow();
@@ -940,21 +1243,12 @@ public final class MainFrame extends JFrame implements TransferListener {
                         }
                     }
                 } catch (Exception ex) {
-                    peerModel.clear();
-                    peerEmptyTitle.setText("Refresh failed");
-                    peerEmptySubtitle.setText("Check tracker connection.");
-                    peerListCardLayout.show(peerListCardPanel, "empty");
-
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                     String msg = cause.getMessage() != null && !cause.getMessage().isBlank()
                             ? cause.getMessage()
                             : cause.getClass().getSimpleName();
-                    JOptionPane.showMessageDialog(
-                            MainFrame.this,
-                            "Could not refresh peers: " + msg,
-                            "Tracker error",
-                            JOptionPane.ERROR_MESSAGE
-                    );
+                    appendActivityLog("Peer refresh failed: " + msg);
+                    runtime.requestImmediateRecovery();
                 } finally {
                     refreshing = false;
                     updateActionStates();
@@ -986,27 +1280,31 @@ public final class MainFrame extends JFrame implements TransferListener {
                 searching = false;
                 try {
                     List<SearchResult> results = get();
+                    lastSuccessfulQuery = query;
                     searchModel.setResults(results);
                     if (results.isEmpty()) {
-                        searchEmptyTitle.setText("No matching files");
                         searchEmptySubtitle.setText("Try another keyword.");
                         searchCardLayout.show(searchCardPanel, "empty");
                     } else {
                         searchCardLayout.show(searchCardPanel, "results");
                     }
                 } catch (Exception ex) {
-                    searchModel.setResults(List.of());
-                    searchEmptyTitle.setText("Search failed");
-                    searchEmptySubtitle.setText("Check tracker connection.");
-                    searchCardLayout.show(searchCardPanel, "empty");
-
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    JOptionPane.showMessageDialog(
-                            MainFrame.this,
-                            "Search failed: " + cause.getMessage(),
-                            "Search error",
-                            JOptionPane.ERROR_MESSAGE
-                    );
+                    String msg = cause.getMessage() != null && !cause.getMessage().isBlank()
+                            ? cause.getMessage()
+                            : cause.getClass().getSimpleName();
+                    appendActivityLog("Catalogue search failed: " + msg);
+
+                    if (searchModel.getRowCount() > 0 && lastSuccessfulQuery != null) {
+                        searchHeaderLabel.setText("Last results for \"" + lastSuccessfulQuery + "\" — tracker unavailable; availability unverified");
+                        searchHeaderLabel.setForeground(getSemanticColor("P2P.warning.foreground", new Color(180, 100, 0)));
+                        searchHeaderLabel.setVisible(true);
+                        searchCardLayout.show(searchCardPanel, "results");
+                    } else {
+                        searchEmptyTitle.setText("Search failed");
+                        searchEmptySubtitle.setText("Tracker unavailable (" + msg + ")");
+                        searchCardLayout.show(searchCardPanel, "empty");
+                    }
                 } finally {
                     updateSearchDetail();
                     updateActionStates();

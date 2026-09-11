@@ -219,8 +219,8 @@ public final class TrackerServer implements AutoCloseable {
             System.err.println("[TRACKER] Client error: " + ex.getMessage());
         } finally {
             if (ownedPeer != null) {
-                registry.unregister(ownedPeer);
                 catalogue.removePeer(ownedPeer.peerId());
+                registry.unregister(ownedPeer);
             }
         }
     }

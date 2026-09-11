@@ -6,106 +6,137 @@ import vn.edu.p2p.common.model.SearchResult;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 public final class FileCatalogue {
-    private static final class Entry {
-        private final FileRecord file;
-        private final Set<String> providerPeerIds = ConcurrentHashMap.newKeySet();
-
-        private Entry(FileRecord file) {
-            this.file = file;
-        }
-    }
-
-    private final ConcurrentMap<String, Entry> entries = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, Set<String>> peerFiles = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, List<FileRecord>> peerSnapshots = new ConcurrentHashMap<>();
 
     public void publishFiles(String peerId, List<FileRecord> files) {
         if (peerId == null || files == null) {
             return;
         }
-
-        Set<String> newIds = new HashSet<>(files.size());
-        for (FileRecord f : files) {
-            newIds.add(f.fileId());
-        }
-
-        Set<String> currentTracked = ConcurrentHashMap.newKeySet();
-        currentTracked.addAll(newIds);
-        Set<String> oldIds = peerFiles.put(peerId, currentTracked);
-
-        // Prune associations no longer present in the updated file list
-        if (oldIds != null) {
-            for (String oldId : oldIds) {
-                if (!newIds.contains(oldId)) {
-                    removeProviderFromFile(oldId, peerId);
-                }
-            }
-        }
-
-        for (FileRecord file : files) {
-            entries.compute(file.fileId(), (id, existing) -> {
-                Entry entry = existing != null ? existing : new Entry(file);
-                entry.providerPeerIds.add(peerId);
-                return entry;
-            });
-        }
+        peerSnapshots.put(peerId, List.copyOf(files));
     }
 
     public void removePeer(String peerId) {
         if (peerId == null) {
             return;
         }
-        Set<String> files = peerFiles.remove(peerId);
-        if (files != null) {
-            for (String fileId : files) {
-                removeProviderFromFile(fileId, peerId);
-            }
-        }
-    }
-
-    private void removeProviderFromFile(String fileId, String peerId) {
-        entries.computeIfPresent(fileId, (id, entry) -> {
-            entry.providerPeerIds.remove(peerId);
-            return entry.providerPeerIds.isEmpty() ? null : entry;
-        });
+        peerSnapshots.remove(peerId);
     }
 
     public List<SearchResult> search(String query, PeerRegistry registry) {
+        if (registry == null) {
+            return List.of();
+        }
+        List<PeerInfo> livePeers = registry.listExcept(null);
+        if (livePeers.isEmpty()) {
+            return List.of();
+        }
+        Map<String, PeerInfo> registeredPeers = new HashMap<>(livePeers.size());
+        for (PeerInfo p : livePeers) {
+            registeredPeers.put(p.peerId(), p);
+        }
+
         String normalizedQuery = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        List<SearchResult> results = new ArrayList<>();
 
-        for (Entry entry : entries.values()) {
-            FileRecord file = entry.file;
-            boolean match = normalizedQuery.isEmpty()
-                    || file.fileName().toLowerCase(Locale.ROOT).contains(normalizedQuery)
-                    || file.fileId().contains(normalizedQuery);
+        record PeerFile(String peerId, FileRecord record) {}
+        Map<String, List<PeerFile>> byHash = new LinkedHashMap<>();
+        Map<String, Set<String>> providersByHash = new HashMap<>();
 
-            if (match) {
-                List<PeerInfo> liveProviders = new ArrayList<>();
-                for (PeerInfo registered : registry.listExcept(null)) {
-                    if (entry.providerPeerIds.contains(registered.peerId())) {
-                        liveProviders.add(registered);
-                    }
-                }
-                if (!liveProviders.isEmpty()) {
-                    liveProviders.sort(Comparator.comparing(PeerInfo::displayName, String.CASE_INSENSITIVE_ORDER));
-                    results.add(new SearchResult(file, liveProviders));
-                }
+        for (Map.Entry<String, List<FileRecord>> entry : peerSnapshots.entrySet()) {
+            String peerId = entry.getKey();
+            if (!registeredPeers.containsKey(peerId)) {
+                continue;
+            }
+            for (FileRecord file : entry.getValue()) {
+                byHash.computeIfAbsent(file.fileId(), k -> new ArrayList<>()).add(new PeerFile(peerId, file));
+                providersByHash.computeIfAbsent(file.fileId(), k -> new HashSet<>()).add(peerId);
             }
         }
 
-        results.sort(Comparator.comparing(r -> r.file().fileName(), String.CASE_INSENSITIVE_ORDER));
+        Comparator<PeerFile> displayOrder = Comparator
+                .comparing((PeerFile pf) -> pf.record().fileName(), String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(pf -> pf.record().fileName())
+                .thenComparing(PeerFile::peerId);
+
+        Comparator<PeerInfo> providerOrder = Comparator
+                .comparing(PeerInfo::displayName, String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(PeerInfo::displayName)
+                .thenComparing(PeerInfo::peerId);
+
+        List<SearchResult> results = new ArrayList<>();
+
+        for (Map.Entry<String, List<PeerFile>> entry : byHash.entrySet()) {
+            String fileId = entry.getKey();
+            List<PeerFile> allPeerFiles = entry.getValue();
+
+            List<PeerFile> matchingNameRecords = new ArrayList<>();
+            if (!normalizedQuery.isEmpty()) {
+                for (PeerFile pf : allPeerFiles) {
+                    if (pf.record().fileName().toLowerCase(Locale.ROOT).contains(normalizedQuery)) {
+                        matchingNameRecords.add(pf);
+                    }
+                }
+            }
+
+            boolean matchesHash = !normalizedQuery.isEmpty() && fileId.contains(normalizedQuery);
+            boolean matches = normalizedQuery.isEmpty() || matchesHash || !matchingNameRecords.isEmpty();
+
+            if (!matches) {
+                continue;
+            }
+
+            List<PeerFile> candidates;
+            if (normalizedQuery.isEmpty() || matchesHash) {
+                candidates = new ArrayList<>(allPeerFiles);
+            } else {
+                candidates = matchingNameRecords;
+            }
+
+            candidates.sort(displayOrder);
+            FileRecord selectedRecord = candidates.get(0).record();
+
+            Set<String> peerIds = providersByHash.get(fileId);
+            List<PeerInfo> liveProviders = new ArrayList<>(peerIds.size());
+            for (String pid : peerIds) {
+                PeerInfo p = registeredPeers.get(pid);
+                if (p != null) {
+                    liveProviders.add(p);
+                }
+            }
+            if (liveProviders.isEmpty()) {
+                continue;
+            }
+            liveProviders.sort(providerOrder);
+
+            results.add(new SearchResult(selectedRecord, liveProviders));
+        }
+
+        Comparator<SearchResult> resultOrder = Comparator
+                .comparing((SearchResult r) -> r.file().fileName(), String.CASE_INSENSITIVE_ORDER)
+                .thenComparing(r -> r.file().fileName())
+                .thenComparing(r -> r.file().fileId());
+
+        results.sort(resultOrder);
         return results;
     }
 
     public int size() {
-        return entries.size();
+        Set<String> distinctHashes = new HashSet<>();
+        for (List<FileRecord> files : peerSnapshots.values()) {
+            for (FileRecord record : files) {
+                distinctHashes.add(record.fileId());
+            }
+        }
+        return distinctHashes.size();
     }
 }

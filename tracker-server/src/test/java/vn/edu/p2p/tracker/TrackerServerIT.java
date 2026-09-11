@@ -196,4 +196,89 @@ class TrackerServerIT {
             assertTrue(resp2.requireHeader("message").contains("Already registered"));
         }
     }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void testAtomicSessionRecoveryWithCataloguePublish() throws Exception {
+        String sha1 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        String sha2 = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+        vn.edu.p2p.common.model.FileRecord file1 = new vn.edu.p2p.common.model.FileRecord(sha1, "file1.txt", 100, 1024, 1);
+        vn.edu.p2p.common.model.FileRecord file2 = new vn.edu.p2p.common.model.FileRecord(sha2, "file2.txt", 200, 1024, 1);
+
+        // Session 1 registers and publishes file1
+        try (Socket socket1 = new Socket("127.0.0.1", port)) {
+            Frame reg1 = new Frame(MessageType.TRACKER_REGISTER, Map.of(
+                    "peerId", "peer-recovery",
+                    "displayName", "Recovery Peer",
+                    "peerPort", "7001"
+            ));
+            FrameIO.write(socket1.getOutputStream(), reg1);
+            Frame resp1 = FrameIO.read(socket1.getInputStream(), 0);
+            assertEquals(MessageType.TRACKER_REGISTER_OK, resp1.type());
+
+            byte[] payload1 = vn.edu.p2p.common.model.CatalogueCodec.encodeFiles(List.of(file1));
+            FrameIO.write(socket1.getOutputStream(), new Frame(MessageType.TRACKER_PUBLISH_FILES, Map.of(), payload1));
+            Frame pubResp1 = FrameIO.read(socket1.getInputStream(), 0);
+            assertEquals(MessageType.TRACKER_PUBLISH_OK, pubResp1.type());
+
+            // Disconnect Session 1
+            FrameIO.write(socket1.getOutputStream(), new Frame(MessageType.TRACKER_DISCONNECT));
+        }
+
+        // Wait for unregister/cleanup to complete
+        long deadline = System.currentTimeMillis() + 3000;
+        boolean reconnected = false;
+        Socket socket2 = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                socket2 = new Socket("127.0.0.1", port);
+                Frame reg2 = new Frame(MessageType.TRACKER_REGISTER, Map.of(
+                        "peerId", "peer-recovery",
+                        "displayName", "Recovery Peer Reconnected",
+                        "peerPort", "7002"
+                ));
+                FrameIO.write(socket2.getOutputStream(), reg2);
+                Frame resp2 = FrameIO.read(socket2.getInputStream(), 0);
+                if (resp2.type() == MessageType.TRACKER_REGISTER_OK) {
+                    reconnected = true;
+                    break;
+                }
+                socket2.close();
+            } catch (Exception ignored) {
+            }
+            Thread.sleep(30);
+        }
+        assertTrue(reconnected, "Should successfully re-register same peerId after previous session disconnects");
+        assertNotNull(socket2);
+        final Socket activeSocket2 = socket2;
+        try (activeSocket2) {
+            // Publish file2 on reconnected session
+            byte[] payload2 = vn.edu.p2p.common.model.CatalogueCodec.encodeFiles(List.of(file2));
+            FrameIO.write(socket2.getOutputStream(), new Frame(MessageType.TRACKER_PUBLISH_FILES, Map.of(), payload2));
+            Frame pubResp2 = FrameIO.read(socket2.getInputStream(), 0);
+            assertEquals(MessageType.TRACKER_PUBLISH_OK, pubResp2.type());
+
+            // Duplicate registration attempt from another socket must fail and cannot evict the owner
+            try (Socket socketDup = new Socket("127.0.0.1", port)) {
+                Frame regDup = new Frame(MessageType.TRACKER_REGISTER, Map.of(
+                        "peerId", "peer-recovery",
+                        "displayName", "Impostor",
+                        "peerPort", "7009"
+                ));
+                FrameIO.write(socketDup.getOutputStream(), regDup);
+                Frame respDup = FrameIO.read(socketDup.getInputStream(), 0);
+                assertEquals(MessageType.ERROR, respDup.type());
+                assertTrue(respDup.requireHeader("message").contains("already registered"));
+            }
+
+            // Reconnected session can search: file2 is present, old file1 is gone, and catalogue survived
+            FrameIO.write(socket2.getOutputStream(), new Frame(MessageType.TRACKER_SEARCH, Map.of("query", "")));
+            Frame searchResp = FrameIO.read(socket2.getInputStream(), 1024 * 1024);
+            assertEquals(MessageType.TRACKER_SEARCH_RESULTS, searchResp.type());
+            List<vn.edu.p2p.common.model.SearchResult> results = vn.edu.p2p.common.model.CatalogueCodec.decodeSearchResults(searchResp.payload());
+            assertEquals(1, results.size(), "Only newly published file2 should be in catalogue");
+            assertEquals("file2.txt", results.get(0).file().fileName());
+            assertEquals("peer-recovery", results.get(0).providers().get(0).peerId());
+        }
+    }
 }

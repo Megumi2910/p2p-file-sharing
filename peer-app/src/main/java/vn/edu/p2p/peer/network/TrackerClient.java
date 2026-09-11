@@ -27,9 +27,28 @@ public final class TrackerClient implements AutoCloseable {
 
     public String connectAndRegister() throws IOException {
         synchronized (requestLock) {
+            Socket oldSocket;
+            synchronized (lifecycleLock) {
+                if (closed) {
+                    throw new IOException("TrackerClient is closed");
+                }
+                oldSocket = this.socket;
+                this.socket = null;
+            }
+            if (oldSocket != null) {
+                try {
+                    oldSocket.close();
+                } catch (IOException ignored) {
+                }
+            }
+
             Socket newSocket = new Socket();
             synchronized (lifecycleLock) {
                 if (closed) {
+                    try {
+                        newSocket.close();
+                    } catch (IOException ignored) {
+                    }
                     throw new IOException("TrackerClient is closed");
                 }
                 this.socket = newSocket;
@@ -42,6 +61,9 @@ public final class TrackerClient implements AutoCloseable {
                         try {
                             newSocket.close();
                         } catch (IOException ignored) {
+                        }
+                        if (this.socket == newSocket) {
+                            this.socket = null;
                         }
                         throw new IOException("TrackerClient was closed during connect");
                     }
@@ -58,8 +80,12 @@ public final class TrackerClient implements AutoCloseable {
                 ));
 
                 Frame response = FrameIO.read(newSocket.getInputStream(), 0);
+                if (response.type() == MessageType.ERROR) {
+                    String msg = response.headers().getOrDefault("message", "Registration rejected by tracker");
+                    throw new IOException("Tracker registration failed: " + msg);
+                }
                 if (response.type() != MessageType.TRACKER_REGISTER_OK) {
-                    throw new IOException("Tracker registration failed: " + response.type());
+                    throw new IOException("Tracker registration failed with unexpected message: " + response.type());
                 }
                 return response.requireHeader("host");
             } catch (Exception ex) {
@@ -68,7 +94,9 @@ public final class TrackerClient implements AutoCloseable {
                         newSocket.close();
                     } catch (IOException ignored) {
                     }
-                    this.socket = null;
+                    if (this.socket == newSocket) {
+                        this.socket = null;
+                    }
                 }
                 if (ex instanceof IOException ioEx) {
                     throw ioEx;
@@ -110,7 +138,9 @@ public final class TrackerClient implements AutoCloseable {
                         currentSocket.close();
                     } catch (IOException ignored) {
                     }
-                    this.socket = null;
+                    if (this.socket == currentSocket) {
+                        this.socket = null;
+                    }
                 }
                 if (ex instanceof IOException ioEx) {
                     throw ioEx;
@@ -146,7 +176,9 @@ public final class TrackerClient implements AutoCloseable {
                         currentSocket.close();
                     } catch (IOException ignored) {
                     }
-                    this.socket = null;
+                    if (this.socket == currentSocket) {
+                        this.socket = null;
+                    }
                 }
                 if (ex instanceof IOException ioEx) {
                     throw ioEx;
@@ -187,7 +219,9 @@ public final class TrackerClient implements AutoCloseable {
                         currentSocket.close();
                     } catch (IOException ignored) {
                     }
-                    this.socket = null;
+                    if (this.socket == currentSocket) {
+                        this.socket = null;
+                    }
                 }
                 if (ex instanceof IOException ioEx) {
                     throw ioEx;

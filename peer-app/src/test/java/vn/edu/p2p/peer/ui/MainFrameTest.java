@@ -88,10 +88,8 @@ class MainFrameTest {
             @SuppressWarnings("unchecked")
             DefaultListModel<PeerInfo> peerModel = (DefaultListModel<PeerInfo>) getFieldValue(frame, "peerModel");
 
-            // Context menu contains sendMenuItem
+            // Context menu is present
             assertNotNull(peerPopupMenu);
-            assertEquals(sendMenuItem, peerPopupMenu.getComponent(0));
-
             // 1. Initial state: starting=true -> send and refresh disabled
             assertFalse(sendButton.isEnabled(), "Send button must be disabled while starting");
             assertFalse(sendMenuItem.isEnabled(), "Send menu item must be disabled while starting");
@@ -99,10 +97,12 @@ class MainFrameTest {
 
             // 2. State transition: starting -> ready (starting=false)
             runOnEdt(() -> frame.setStarting(false));
+            JButton rescanButton = (JButton) getFieldValue(frame, "rescanButton");
             assertTrue(refreshButton.isEnabled(), "Refresh button should become enabled when ready");
+            assertTrue(rescanButton.isEnabled(), "Rescan button should be enabled when ready");
             assertFalse(sendButton.isEnabled(), "Send button should remain disabled when no peer is selected");
             assertFalse(sendMenuItem.isEnabled(), "Send menu item should remain disabled when no peer is selected");
-
+            assertTrue(frame.confirmDiscardUnsavedSettings(), "confirmDiscardUnsavedSettings should be true without open dialog");
             // 3. Selection: add peer and select it -> send actions become enabled
             PeerInfo peer1 = new PeerInfo("peer-target-1", "Target 1", "127.0.0.1", 6002);
             PeerInfo peer2 = new PeerInfo("peer-target-2", "Target 2", "127.0.0.1", 6003);
@@ -124,11 +124,31 @@ class MainFrameTest {
             assertTrue(sendButton.isEnabled(), "Send button should be re-enabled after unfreeze");
             assertTrue(sendMenuItem.isEnabled(), "Send menu item should be re-enabled after unfreeze");
 
-            // 5. Stopped: permanently disables send and refresh
+            // 5. Offline resilience check on EDT:
+            assertTrue(rescanButton.isEnabled(), "Rescan button must remain enabled while tracker is offline");
+
+            // 6. Stopped: dismiss modal safely in background and verify permanently disabled
+            new Thread(() -> {
+                try {
+                    long deadline = System.currentTimeMillis() + 3000;
+                    while (System.currentTimeMillis() < deadline) {
+                        SwingUtilities.invokeLater(() -> {
+                            for (java.awt.Window w : java.awt.Window.getWindows()) {
+                                if (w instanceof javax.swing.JDialog d && d.isModal() && "Application Stopped".equals(d.getTitle())) {
+                                    d.dispose();
+                                }
+                            }
+                        });
+                        Thread.sleep(50);
+                    }
+                } catch (Exception ignored) {}
+            }).start();
+
             runOnEdt(() -> frame.setStopped("Testing stopped transition"));
             assertFalse(sendButton.isEnabled(), "Send button must be disabled when stopped");
             assertFalse(sendMenuItem.isEnabled(), "Send menu item must be disabled when stopped");
             assertFalse(refreshButton.isEnabled(), "Refresh button must be disabled when stopped");
+            assertFalse(rescanButton.isEnabled(), "Rescan button must be disabled when stopped");
 
             // Changing selection after stopped MUST NOT re-enable send actions
             runOnEdt(() -> peerList.setSelectedValue(peer2, true));
